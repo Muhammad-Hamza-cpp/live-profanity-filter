@@ -1,0 +1,55 @@
+# Words to mute. One per line, case-insensitive.
+#   *  is a wildcard:  fuck*  matches fuck, fucking, fucker ...   *shit*  matches bullshit, shitty ...
+#   A line with no * must match the whole word exactly.
+#   Lines starting with # are ignored. Edit freely; restart the program after changes.
+# Anything the transcriber itself bleeps (like "f***") is always muted.
+
+# --- strong ---
+*fuck*
+motherf*
+*shit*
+bitch*
+bastard*
+asshole*
+ass
+asses
+dumbass*
+jackass*
+smartass*
+badass*
+asshat*
+dick
+dicks
+dickhead*
+cock
+cocks
+cocksucker*
+cunt*
+prick
+pricks
+piss
+pissed
+pissing
+slut*
+whore*
+twat*
+wank*
+bollock*
+douche*
+
+# --- slurs ---
+nigga*
+nigger*
+fag
+fags
+faggot*
+retard
+retards
+retarded
+
+# --- mild (put a # in front of any you don't mind) ---
+damn*
+goddamn*
+goddam*
+hell
+crap*
