@@ -1,0 +1,27 @@
+{"variant": "small.en:3000", "step": 0.2, "ms_per_call": 139.9, "gpu_busy": 0.7, "caught": "30/30", "safe_delay": 0.74, "p90_needed": 0.43, "clean_overmuted": "31/365", "missed": []}
+{"variant": "small.en:3000", "step": 0.3, "ms_per_call": 141.7, "gpu_busy": 0.47, "caught": "30/30", "safe_delay": 0.82, "p90_needed": 0.62, "clean_overmuted": "35/365", "missed": []}
+{"variant": "small.en:3000", "step": 0.4, "ms_per_call": 138.4, "gpu_busy": 0.35, "caught": "30/30", "safe_delay": 0.76, "p90_needed": 0.63, "clean_overmuted": "29/365", "missed": []}
+{"variant": "small.en:400", "step": 0.2, "ms_per_call": 655.4, "gpu_busy": 3.28, "caught": "30/30", "safe_delay": 2.59, "p90_needed": 2.37, "clean_overmuted": "42/365", "missed": []}
+{"variant": "small.en:400", "step": 0.3, "ms_per_call": 710.9, "gpu_busy": 2.37, "caught": "29/30", "safe_delay": 2.77, "p90_needed": 2.37, "clean_overmuted": "42/365", "missed": ["normal:damn"]}
+{"variant": "small.en:400", "step": 0.4, "ms_per_call": 751.3, "gpu_busy": 1.88, "caught": "30/30", "safe_delay": 2.98, "p90_needed": 2.41, "clean_overmuted": "37/365", "missed": []}
+{"variant": "small.en:500", "step": 0.2, "ms_per_call": 300.6, "gpu_busy": 1.5, "caught": "30/30", "safe_delay": 2.5, "p90_needed": 2.3, "clean_overmuted": "43/365", "missed": []}
+{"variant": "small.en:500", "step": 0.3, "ms_per_call": 300.2, "gpu_busy": 1.0, "caught": "30/30", "safe_delay": 3.01, "p90_needed": 1.71, "clean_overmuted": "43/365", "missed": []}
+{"variant": "small.en:500", "step": 0.4, "ms_per_call": 292.5, "gpu_busy": 0.73, "caught": "30/30", "safe_delay": 2.22, "p90_needed": 1.79, "clean_overmuted": "32/365", "missed": []}
+{"variant": "small.en-enc10:400", "step": 0.2, "ms_per_call": 327.5, "gpu_busy": 1.64, "caught": "29/30", "safe_delay": 4.04, "p90_needed": 3.37, "clean_overmuted": "31/365", "missed": ["fast:Hell"]}
+{"variant": "small.en-enc10:400", "step": 0.3, "ms_per_call": 325.9, "gpu_busy": 1.09, "caught": "30/30", "safe_delay": 3.5, "p90_needed": 2.85, "clean_overmuted": "37/365", "missed": []}
+{"variant": "small.en-enc10:400", "step": 0.4, "ms_per_call": 342.7, "gpu_busy": 0.86, "caught": "26/30", "safe_delay": 4.15, "p90_needed": 3.13, "clean_overmuted": "25/365", "missed": ["fast:damn", "fast:asshole.", "noisy:Bullshit,", "noisy:shit,"]}
+{"variant": "tiny.en:3000", "step": 0.2, "ms_per_call": 50.5, "gpu_busy": 0.25, "caught": "30/30", "safe_delay": 0.48, "p90_needed": 0.39, "clean_overmuted": "22/365", "missed": []}
+{"variant": "tiny.en:3000", "step": 0.3, "ms_per_call": 50.6, "gpu_busy": 0.17, "caught": "30/30", "safe_delay": 0.48, "p90_needed": 0.46, "clean_overmuted": "20/365", "missed": []}
+{"variant": "tiny.en:3000", "step": 0.4, "ms_per_call": 49.9, "gpu_busy": 0.12, "caught": "30/30", "safe_delay": 1.37, "p90_needed": 0.66, "clean_overmuted": "17/365", "missed": []}
+{"variant": "tiny.en:400", "step": 0.2, "ms_per_call": 286.7, "gpu_busy": 1.43, "caught": "30/30", "safe_delay": 1.76, "p90_needed": 1.17, "clean_overmuted": "80/365", "missed": []}
+{"variant": "tiny.en:400", "step": 0.3, "ms_per_call": 292.1, "gpu_busy": 0.97, "caught": "30/30", "safe_delay": 1.93, "p90_needed": 1.4, "clean_overmuted": "70/365", "missed": []}
+{"variant": "tiny.en:400", "step": 0.4, "ms_per_call": 319.9, "gpu_busy": 0.8, "caught": "30/30", "safe_delay": 1.5, "p90_needed": 1.38, "clean_overmuted": "72/365", "missed": []}
+{"variant": "base.en:400", "step": 0.2, "ms_per_call": 371.4, "gpu_busy": 1.86, "caught": "30/30", "safe_delay": 2.31, "p90_needed": 1.38, "clean_overmuted": "60/365", "missed": []}
+{"variant": "base.en:400", "step": 0.3, "ms_per_call": 390.2, "gpu_busy": 1.3, "caught": "30/30", "safe_delay": 2.38, "p90_needed": 1.79, "clean_overmuted": "66/365", "missed": []}
+{"variant": "base.en:400", "step": 0.4, "ms_per_call": 400.4, "gpu_busy": 1.0, "caught": "30/30", "safe_delay": 2.01, "p90_needed": 1.7, "clean_overmuted": "49/365", "missed": []}
+{"variant": "distil-small.en:3000", "step": 0.2, "ms_per_call": 85.9, "gpu_busy": 0.43, "caught": "30/30", "safe_delay": 1.22, "p90_needed": 0.46, "clean_overmuted": "29/365", "missed": []}
+{"variant": "distil-small.en:3000", "step": 0.3, "ms_per_call": 87.3, "gpu_busy": 0.29, "caught": "30/30", "safe_delay": 4.13, "p90_needed": 0.58, "clean_overmuted": "28/365", "missed": []}
+{"variant": "distil-small.en:3000", "step": 0.4, "ms_per_call": 86.9, "gpu_busy": 0.22, "caught": "29/30", "safe_delay": 1.4, "p90_needed": 0.66, "clean_overmuted": "27/365", "missed": ["fast:damn"]}
+{"variant": "distil-small.en:3000", "step": 0.2, "ms_per_call": 86.9, "gpu_busy": 0.43, "caught": "30/30", "safe_delay": 1.22, "p90_needed": 0.46, "clean_overmuted": "29/365", "missed": [], "worst": [[1.22, "noisy:asshole."], [0.62, "normal:asshole."], [0.46, "normal:motherfucker,"]]}
+{"variant": "distil-small.en:450", "step": 0.2, "ms_per_call": 60.8, "gpu_busy": 0.3, "caught": "28/30", "safe_delay": 1.83, "p90_needed": 0.91, "clean_overmuted": "29/365", "missed": ["normal:damn", "fast:damn"], "worst": [[1.83, "noisy:asshole."], [1.42, "normal:asshole."], [0.92, "noisy:Hell"]]}
+{"variant": "small.en:3000", "step": 0.2, "ms_per_call": 142.1, "gpu_busy": 0.71, "caught": "30/30", "safe_delay": 0.59, "p90_needed": 0.43, "clean_overmuted": "33/365", "missed": [], "worst": [[0.59, "noisy:motherfucker,"], [0.47, "fast:motherfucker,"], [0.45, "noisy:shit,"]]}
