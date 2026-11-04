@@ -2,6 +2,14 @@
 
 **Goal:** keep the worst-case audio delay **under 0.4 s** while still silencing every curse word. The app on `main` holds audio back 1.2 s (Whisper `small.en`), or 0.8 s in "Low lag" mode. [low-latency-research.md](low-latency-research.md) got Parakeet CTC down to about 0.5–0.65 s. Every transcribe-then-match approach waits until a word has been fully recognised, so this branch trains a model that answers one question for each 80 ms frame: *is this part of a curse word?* No transcript is involved.
 
+<p>
+<img src="images/01-summary.png" width="32%" alt="Summary: 0.40 s delay, 30/30 curse words caught, -91% false mutes on non-speech, 12 ms per check, 0.93 M trained parameters, 31.6 h training speech">
+<img src="images/02-how-it-works.png" width="32%" alt="How it works: virtual cable, 0.40 s delay buffer, frozen Parakeet encoder, trained detector head, mute decision, headphones">
+<img src="images/05-iterations.png" width="32%" alt="Three versions: v1 guessed from context, v2 tripped by game sounds, v3 trained with sound effects">
+</p>
+
+More figures: [latency](images/03-latency.png) · [training data](images/04-training-data.png) · [CUDA graph](images/06-cuda-graph.png). All are 1200×1500 PNGs, rendered by [`figures.py`](../lab/detector/figures.py) from the numbers in this report.
+
 **Update (later on 2026-11-04):**
 - In a first Call of Duty session, v2 blocked every real swear word but fired often on game sound.
 - **v3**, trained with sound effects as negatives, mutes 91% less on held-out non-speech audio.
@@ -205,14 +213,15 @@ Through VB-Cable (`selftest.py --model detector`), v3 is borderline at 0.35 s: o
 
 ## 6. Next steps
 
-1. **Onsets:** settle on the pre-pad, or train the head to also predict a start offset within the frame. Frames are 80 ms, which is coarse.
-2. **Precision (v3):** unfreeze the top 2–4 encoder blocks (about 25M parameters each) with gradient checkpointing, and weight sound-alike and context negatives more heavily in the loss. Regenerate `train` with the `merge_map` fix and the 4-kind sentence mix.
-3. **Real speech, needed before any claim:**
+1. **Game audio (next):** play with "Save audio for training" on, then label the recordings offline with Whisper large-v3, using full context and no time pressure. Train v4 on that alongside the synthetic data. ESC-50 isn't gunfire or game music; real sessions are.
+2. **Onsets:** settle on the pre-pad, or train the head to also predict a start offset within the frame. Frames are 80 ms, which is coarse, and onsets are why v3 is borderline at 0.35 s.
+3. **Precision (v4+):** unfreeze the top 2–4 encoder blocks (about 25M parameters each) with gradient checkpointing, and weight sound-alike and context negatives more heavily in the loss. Regenerate `train` with the `merge_map` fix and the 4-kind sentence mix.
+4. **Real speech, needed before any claim:**
    - Build a real-speech test set: People's Speech rows containing curse words (stream only transcripts, then fetch just the matching audio), forced-aligned and spot-checked by ear, plus your own clips kept locally.
    - Add L2-ARCTIC and `ryan` to the test voices; the current 8 test shards missed them by chance.
-4. **Real-speech training data:** the same People's Speech pipeline for training, if the synthetic-only model doesn't carry over.
-5. **App polish:** the mode itself is in (see "In the app"). Still to do: group/category toggles and a threshold slider in the UI, a `selftest.py` run through VB-Cable, and live testing in games.
-6. **Smaller and faster (optional):** distil the encoder, or use a smaller one such as Parakeet 110M, so the filter uses less of the GPU while gaming.
+5. **Real-speech training data:** the same People's Speech pipeline for training, if the synthetic-only model doesn't carry over.
+6. **App polish:** the mode, the VB-Cable self-test and live game testing are all done. Still to do: group/category toggles and a threshold slider in the UI.
+7. **Smaller and faster (optional):** distil the encoder, or use a smaller one such as Parakeet 110M, so the filter uses less of the GPU while gaming.
 
 ## 7. Reproduce
 
@@ -229,13 +238,16 @@ python -m venv .venv-lab
 .venv-lab\Scripts\python lab\detector\make_tts.py --split test --utts 2000
 .venv-lab\Scripts\python lab\detector\make_tts.py --split test_ctx --kind context --utts 1000
 .venv-lab\Scripts\python bench.py --models small.en --steps 0.4      # bench clips into test/
+# ESC-50 sound effects (v3): unzip https://github.com/karoldvl/ESC-50/archive/master.zip into data\esc50_dl\
 
 $env:TRANSFORMERS_VERBOSITY="error"
-.venv-lab\Scripts\python lab\detector\train.py --name v2 --steps 8000 --train train,train_ctx
-.venv-lab\Scripts\python lab\detector\eval.py runs\v2\head.pt --thr 0.5 0.7 --confirm 2
+.venv-lab\Scripts\python lab\detector\train.py --name v3 --steps 8000 --train train,train_ctx
+.venv-lab\Scripts\python lab\detector\eval.py runs\v3\head.pt --thr 0.5 --confirm 2 --pad 0.06 0.02 --sets bench,tts,ctx,esc
+.venv-lab\Scripts\python selftest.py 0.4 --model detector             # through VB-Cable
+.venv-lab\Scripts\python lab\detector\figures.py                      # docs\images\*.png (needs matplotlib)
 ```
 
-Data (`data/`), voices and training runs (`lab/detector/runs/`) are gitignored. The v2 head the app uses is committed as `lab/detector/models/detector-v2.pt` (3.7 MB).
+Data (`data/`), voices and training runs (`lab/detector/runs/`) are gitignored. The heads are committed under `lab/detector/models/`, 3.7 MB each: `detector-v3.pt` is what the app uses, and `detector-v2.pt` is the one from the first game test.
 
 | File | Purpose |
 |---|---|
@@ -248,4 +260,5 @@ Data (`data/`), voices and training runs (`lab/detector/runs/`) are gitignored. 
 | `lab/detector/diag_fp.py` | Where false mutes come from (edge guesses vs. late flicker; which words) |
 | `lab/detector/probe_speed.py`, `bench_graph.py` | Encoder speed eager vs. CUDA graph; Parakeet gap-fill at small steps |
 | `lab/detector/live_sim.py` | The app's engine in real time without audio devices, scored like `selftest.py` |
-| `censor.py` (`detect_forever`), `app.pyw`, `app-lab.bat` | The detector as an app mode and its launcher |
+| `censor.py` (`detect_forever`), `app.pyw`, `app-lab.bat` | The detector as an app mode and its launcher; check timings, saving audio for training |
+| `lab/detector/figures.py`, `docs/images/` | Summary figures (1200×1500 PNG) |

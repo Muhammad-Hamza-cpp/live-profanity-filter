@@ -18,6 +18,22 @@ Apps / browser / games
   Your real speakers / headphones
 ```
 
+## Experimental: Ultra-low lag mode (this branch)
+
+On `research/mute-detector` the app has an extra mode with **0.40 s of delay instead of 1.2 s**. It doesn't transcribe at all: a small detector (0.93 M parameters), trained here on top of a frozen [Parakeet](https://huggingface.co/nvidia/parakeet-ctc-0.6b) speech encoder, scores every 80 ms of audio for curse words, with a check every 50 ms (12 ms each on an RTX 4050 laptop).
+
+<p>
+<img src="docs/images/01-summary.png" width="32%" alt="Summary of results">
+<img src="docs/images/02-how-it-works.png" width="32%" alt="How the detector works">
+<img src="docs/images/05-iterations.png" width="32%" alt="v1 to v3: what went wrong and what fixed it">
+</p>
+
+To try it:
+1. Install the lab environment (see [docs/mute-detector.md](docs/mute-detector.md#7-reproduce)).
+2. Start **`app-lab.bat`** and choose **"Ultra-low lag - trained detector (experimental)"**.
+
+It's experimental: it was trained on synthetic speech, and it still clips some clean words next to curse words. The full write-up covers how the training data was made, every result, what went wrong and what's next: **[docs/mute-detector.md](docs/mute-detector.md)**.
+
 ## Requirements
 
 - Windows 10/11
@@ -102,3 +118,6 @@ These tests use synthetic speech, so real-world accuracy will be lower.
 | `install.bat` / `install.ps1` | One-time setup |
 | `start.bat` / `restore-sound.bat` | CLI launcher / emergency sound restore |
 | `selftest.py`, `bench.py`, `bench_padding.py` | Tests and benchmarks |
+| `app-lab.bat` | Starts the app from `.venv-lab`, adding the experimental Ultra-low lag mode |
+| `lab/detector/` | The trained detector: data generation, training, evaluation, figures ([docs/mute-detector.md](docs/mute-detector.md)) |
+| `docs/` | Research write-ups: [mute detector](docs/mute-detector.md), [low-latency research](docs/low-latency-research.md) |
