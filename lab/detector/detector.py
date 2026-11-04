@@ -44,12 +44,15 @@ class Head(nn.Module):
         return self.out(x)
 
 
-def load_encoder(device="cuda"):
+def load_encoder(device="cuda", ctc=False):
+    """Feature extractor + frozen encoder (+ Parakeet's own CTC output layer if ctc=True)."""
     from transformers import AutoModelForCTC, AutoProcessor
     proc = AutoProcessor.from_pretrained(ENCODER)
     model = AutoModelForCTC.from_pretrained(ENCODER, dtype=torch.bfloat16).to(device).eval()
     for p in model.parameters():
         p.requires_grad_(False)
+    if ctc:
+        return proc.feature_extractor, model.encoder, model.ctc_head, model.config.pad_token_id
     return proc.feature_extractor, model.encoder
 
 
@@ -71,21 +74,24 @@ def features(fe, audio, device="cuda"):
     return f.to(torch.bfloat16), mask
 
 
-def encode(encoder, feats, mask):
+def encode(encoder, feats, mask, last=False):
     out = encoder(input_features=feats, attention_mask=mask, output_hidden_states=True)
     hs = out.hidden_states
     off = len(hs) - 24  # 1 if the block input is included at index 0, else 0
-    return torch.stack([hs[i - 1 + off] for i in LAYERS])
+    states = torch.stack([hs[i - 1 + off] for i in LAYERS])
+    return (states, out.last_hidden_state) if last else states
 
 
 class Detector:
     """Streaming use: call probs(window) with the last WINDOW seconds of 16 kHz audio (left-padded
-    with zeros if shorter); returns (frames, groups) probabilities for that window. The encoder
-    and head run as one CUDA graph (~12 ms on an RTX 4050)."""
+    with zeros if shorter); returns (frames, groups) probabilities for that window. score(window)
+    also returns, per frame, the probability that Parakeet's own CTC layer hears speech there
+    (not blank) - the speech gate. Encoder, head and CTC layer run as one CUDA graph (~12 ms on
+    an RTX 4050)."""
 
     def __init__(self, head_path, device="cuda", graph=True):
         self.device = device
-        self.fe, self.encoder = load_encoder(device)
+        self.fe, self.encoder, self.ctc, self.blank = load_encoder(device, ctc=True)
         ckpt = torch.load(head_path, map_location=device)
         self.head = Head().to(device).eval()
         self.head.load_state_dict(ckpt["head"])
@@ -105,9 +111,13 @@ class Detector:
                 self.out = self._run()
 
     def _run(self):
-        return torch.sigmoid(self.head(encode(self.encoder, self.static_f, self.static_m)))[0]
+        states, last = encode(self.encoder, self.static_f, self.static_m, last=True)
+        p = torch.sigmoid(self.head(states))[0]
+        speech = 1 - torch.softmax(self.ctc(last).float(), -1)[0, :, self.blank]
+        return torch.cat([p, speech[:, None]], 1)
 
-    def probs(self, audio):
+    def score(self, audio):
+        """-> (probs (frames, groups), speech (frames,))"""
         if len(audio) < self.n:
             audio = np.concatenate([np.zeros(self.n - len(audio), np.float32), audio])
         f, m = features(self.fe, [audio[-self.n:].astype(np.float32)], self.device)
@@ -115,6 +125,11 @@ class Detector:
         self.static_m.copy_(m)
         if self.graph is None:
             with torch.inference_mode():
-                return self._run().cpu().numpy()
-        self.graph.replay()
-        return self.out.cpu().numpy()
+                out = self._run().cpu().numpy()
+        else:
+            self.graph.replay()
+            out = self.out.cpu().numpy()
+        return out[:, :-1], out[:, -1]
+
+    def probs(self, audio):
+        return self.score(audio)[0]
