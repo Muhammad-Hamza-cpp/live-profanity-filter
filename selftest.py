@@ -57,7 +57,7 @@ def main():
     proc = subprocess.Popen(
         [sys.executable, "-u", str(HERE / "censor.py"), "--no-switch", "--no-speaker", "--delay", delay,
          "--record", str(censored), "--duration", str(length + float(delay) + 2), *sys.argv[2:]],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, encoding="utf-8", errors="replace")
     for line in proc.stdout:
         print("  censor> " + line.rstrip())
         if "READY" in line:

@@ -25,7 +25,9 @@ PRESETS = {
 # Trained frame detector (docs/mute-detector.md). Only offered when it can run: lab environment + weights.
 if DETECTOR_HEAD.exists() and importlib.util.find_spec("torch"):
     PRESETS["Ultra-low lag - trained detector (experimental)"] = {
-        "model": DETECTOR, "step": 0.05, "delay": 0.35, "pad_before": 0.06, "pad_after": 0.02, "threshold": 0.5}
+        "model": DETECTOR, "step": 0.05, "delay": 0.4, "pad_before": 0.06, "pad_after": 0.02, "threshold": 0.5,
+        "gate": None}
+RECORDINGS = HERE / "data" / "recordings"
 
 
 class App:
@@ -75,6 +77,9 @@ class App:
         row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         self.count_label = ttk.Label(row, text="Muted this session: 0")
         self.count_label.pack(side="left")
+        self.save_audio = tk.BooleanVar(value=self.settings.get("save_audio", False))
+        self.save_check = ttk.Checkbutton(row, text="Save audio for training", variable=self.save_audio)
+        self.save_check.pack(side="left", padx=(12, 0))
         ttk.Button(row, text="Edit word list", command=lambda: os.startfile(HERE / "words.txt")).pack(side="right")
 
         self.log_box = tk.Text(frm, height=12, width=58, state="disabled", font=("Consolas", 9),
@@ -98,7 +103,8 @@ class App:
 
     def save_settings(self):
         SETTINGS.write_text(json.dumps({"speaker": self.speaker.get(), "preset": self.preset.get(),
-                                        "delay": round(self.delay.get(), 2)}, indent=2))
+                                        "delay": round(self.delay.get(), 2), "save_audio": self.save_audio.get()},
+                                       indent=2))
 
     def refresh_speakers(self):
         devs = playback_devices()
@@ -134,12 +140,13 @@ class App:
             self.count_label.config(text="Muted this session: 0")
             self.session = Session(model=p["model"], step=p["step"], delay=round(self.delay.get(), 2),
                                    pad_before=p["pad_before"], pad_after=p["pad_after"],
-                                   threshold=p.get("threshold", 0.5),
+                                   threshold=p.get("threshold", 0.5), gate=p.get("gate"),
+                                   save_dir=RECORDINGS if self.save_audio.get() and p["model"] == DETECTOR else None,
                                    output=self.speaker.get() or None,
                                    log=lambda m: self.events.put(("log", m)),
                                    on_mute=lambda: self.events.put(("mute", None)))
             self.set_status("Starting...", "#c80")
-            for w in (self.speaker, self.preset, self.delay_scale):
+            for w in (self.speaker, self.preset, self.delay_scale, self.save_check):
                 w.config(state="disabled")
             threading.Thread(target=self._start_worker, daemon=True).start()
 
@@ -175,6 +182,7 @@ class App:
                 self.speaker.config(state="readonly")
                 self.preset.config(state="readonly")
                 self.delay_scale.config(state="normal")
+                self.save_check.config(state="normal")
                 if kind == "failed":
                     self.add_log(f"ERROR: {payload}")
                     messagebox.showerror("Audio Censor", payload)

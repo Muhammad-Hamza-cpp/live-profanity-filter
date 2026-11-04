@@ -26,7 +26,7 @@ HELPER = HERE / "audio_default.ps1"
 # Experimental trained detector (docs/mute-detector.md): needs the lab environment (torch).
 DETECTOR = "detector"
 DETECTOR_DIR = HERE / "lab" / "detector"
-DETECTOR_HEAD = DETECTOR_DIR / "models" / "detector-v2.pt"
+DETECTOR_HEAD = DETECTOR_DIR / "models" / "detector-v3.pt"
 # Tuned with bench.py / bench_padding.py: small.en never needed more than 0.76 s, so 1.2 s leaves margin.
 DEFAULT_MODEL = "small.en"
 DEFAULT_DELAY = 1.2   # seconds
@@ -98,9 +98,10 @@ def mask(word):
 class Censor:
     def __init__(self, model, patterns, sr, channels, delay, pad_before=0.06, pad_after=0.18,
                  window=4.0, step=0.4, verbose=False, log=log, on_mute=None, shift=0.0,
-                 threshold=0.5, confirm=2):
+                 threshold=0.5, confirm=2, gate=None):
         self.model, self.patterns = model, patterns
-        self.threshold, self.confirm = threshold, confirm
+        self.threshold, self.confirm, self.gate = threshold, confirm, gate
+        self.events = []  # detector mutes: (start, end, group, prob, late), for recordings
         self.log, self.on_mute = log, on_mute
         self.sr, self.ch = sr, channels
         self.delay = int(delay * sr)
@@ -217,7 +218,7 @@ class Censor:
         groups = [i for i, g in enumerate(GROUP_NAMES) if g in enabled_groups(self.patterns)]
         win, frame, grid = int(WINDOW * self.sr), int(FRAME * self.sr), int(0.01 * self.sr)
         runs = {}  # 10 ms grid index -> checks in a row above the threshold
-        done = 0
+        done, times, last_report = 0, [], time.time()
         while not self.stop.is_set():
             end = self.write_pos
             if end - done < self.step:
@@ -229,20 +230,29 @@ class Censor:
                 runs = {}
                 continue
             t0 = time.perf_counter()
-            p = self.model.probs(resample_poly(audio, self.up, self.down).astype(np.float32))[:, groups]
+            p, speech = self.model.score(resample_poly(audio, self.up, self.down).astype(np.float32))
+            p = p[:, groups]
             took = time.perf_counter() - t0
+            times.append(took)
+            if time.time() - last_report > 30:  # is a game starving the GPU? (LATE mutes)
+                t = np.array(times) * 1000
+                self.log(f"detector checks: median {np.median(t):.0f} ms, p95 {np.percentile(t, 95):.0f} ms, "
+                         f"{np.mean(t > self.step / self.sr * 1000):.0%} slower than the {self.step / self.sr * 1000:.0f} ms step")
+                times, last_report = [], time.time()
+            ok = p.max(-1) > self.threshold
+            if self.gate:  # only where Parakeet's own CTC layer hears speech: not gunfire, music ...
+                k, s_thr = self.gate
+                ok &= np.convolve((speech > s_thr).astype(float), np.ones(2 * k + 1), mode="same") > 0
             above = {}
-            for f in np.nonzero(p.max(-1) > self.threshold)[0]:
+            for f in np.nonzero(ok)[0]:
                 s = end - win + f * frame
                 if s >= end:  # not heard yet
                     continue
                 for i in range(s // grid, (s + frame) // grid):
-                    above[i] = groups[int(p[f].argmax())]
+                    above[i] = (groups[int(p[f].argmax())], float(p[f].max()))
             lo = (end - win) // grid
             runs = {i: runs.get(i, 0) + 1 for i in above if i >= lo}
             hit = sorted(i for i, n in runs.items() if n >= self.confirm)
-            if self.verbose and took > self.step:
-                self.log(f"check took {took * 1000:.0f} ms (> step) - GPU busy?")
             # contiguous runs of grid points -> mute ranges
             spans, start = [], None
             for a, b in zip(hit, hit[1:] + [None]):
@@ -250,13 +260,14 @@ class Censor:
                 if b != a + 1:
                     spans.append((start, a, above[start]))
                     start = None
-            for a, b, g in spans:
+            for a, b, (g, prob) in spans:
                 s = a * grid - int(self.pad_before * self.sr)
                 e = (b + 1) * grid + int(self.pad_after * self.sr)
                 if e < self.play_pos - self.sr // 2:
                     continue  # a flicker on audio that played long ago, not a late word
                 if self.add_mute(s, e):
                     self.muted_count += 1
+                    self.events.append((s, e, GROUP_NAMES[g], prob, s < self.play_pos))
                     margin = (s - self.play_pos) / self.sr
                     name = mask(GROUP_NAMES[g])
                     if margin < 0:
@@ -326,10 +337,12 @@ class Session:
 
     def __init__(self, model=DEFAULT_MODEL, delay=DEFAULT_DELAY, step=DEFAULT_STEP, words=HERE / "words.txt",
                  output=None, switch_default=True, play=True, record=False, verbose=False,
-                 log=log, on_mute=None, pad_before=0.06, pad_after=0.18, threshold=0.5, confirm=2):
+                 log=log, on_mute=None, pad_before=0.06, pad_after=0.18, threshold=0.5, confirm=2,
+                 gate=None, save_dir=None):
         self.model_name, self.delay, self.step, self.words = model, delay, step, words
         self.pads = pad_before, pad_after
-        self.threshold, self.confirm = threshold, confirm
+        self.threshold, self.confirm, self.gate, self.save_dir = threshold, confirm, gate, save_dir
+        self._saver = None
         self.output, self.switch_default, self.play, self.record = output, switch_default, play, record
         self.verbose, self.log, self.on_mute = verbose, log, on_mute
         self.censor, self.streams, self.recorded = None, [], []
@@ -339,6 +352,10 @@ class Session:
     def start(self):
         add_cuda_dlls()
         import sounddevice as sd
+        # PortAudio lists devices once per process. Rescan, so a device added or switched since
+        # (VB-Cable installed, headphones plugged in) isn't opened through a stale entry.
+        sd._terminate()
+        sd._initialize()
 
         devs = playback_devices()
         cable = next((d for d in devs if d["name"].startswith("CABLE Input")), None)
@@ -364,7 +381,7 @@ class Session:
         self.censor = Censor(model, load_words(self.words), sr, channels, self.delay, *self.pads, step=self.step,
                              verbose=self.verbose, log=self.log, on_mute=self.on_mute,
                              shift=TIMESTAMP_SHIFT.get(self.model_name, 0.0),
-                             threshold=self.threshold, confirm=self.confirm)
+                             threshold=self.threshold, confirm=self.confirm, gate=self.gate)
 
         def on_input(indata, frames, t, status):
             self.censor.push(indata)
@@ -381,10 +398,18 @@ class Session:
         if self.play:
             self.streams.append(sd.OutputStream(device=out_idx, samplerate=sr, channels=channels, dtype="float32",
                                                 callback=on_output, extra_settings=settings))
-        for s in self.streams:
-            s.start()
+        try:
+            for s in self.streams:
+                s.start()
+        except sd.PortAudioError as e:
+            raise RuntimeError(f"Could not start audio on {self.speaker['name']} ({e}). If headphones were "
+                               "just plugged in or out, or another app is using the device exclusively, "
+                               "try Start again or pick the device under Speakers.") from e
         loop = self.censor.detect_forever if self.model_name == DETECTOR else self.censor.transcribe_forever
         threading.Thread(target=loop, daemon=True).start()
+        if self.save_dir:
+            self._saver = threading.Thread(target=self._save_loop, daemon=True)
+            self._saver.start()
         if self.record and not self.play:  # no output device to pace us: render on our own clock
             threading.Thread(target=self._clock, args=(sr,), daemon=True).start()
         if self.switch_default:
@@ -395,6 +420,39 @@ class Session:
                 self._switched = True
         self.log(f"Filtering ON  | model {self.model_name} on {where} | delay {self.delay}s | "
                  f"output -> {self.speaker['name'] if self.play else '(none)'}")
+
+    def _save_loop(self):
+        """Keep what came in (16 kHz mono FLAC, a file every 30 s) and every mute decision, to train
+        the detector on real game audio later. Everything stays in save_dir on this PC."""
+        import json
+        import soundfile as sf
+        from scipy.signal import resample_poly
+        c = self.censor
+        out = Path(self.save_dir) / time.strftime("%Y%m%d-%H%M%S")
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "session.json").write_text(json.dumps({
+            "model": self.model_name, "delay": self.delay, "step": self.step, "threshold": self.threshold,
+            "confirm": self.confirm, "gate": self.gate, "pads": self.pads, "sample_rate": 16000}, indent=2))
+        self.log(f"Saving the audio for training to {out}")
+        saved, part, n_events = 0, 0, 0
+        while True:
+            stopping = c.stop.wait(30)
+            end = c.write_pos
+            start = max(saved, end - c.size + c.sr)  # never older than the ring buffer still holds
+            if end - start > c.sr // 10:  # skip a near-empty last part
+                a = resample_poly(c._read(start, end).mean(axis=1), c.up, c.down).astype(np.float32)
+                sf.write(out / f"{part:04d}.flac", a, 16000)
+                with open(out / "parts.jsonl", "a") as f:
+                    f.write(json.dumps({"file": f"{part:04d}.flac", "start": start / c.sr}) + "\n")
+                part, saved = part + 1, end
+            new, n_events = c.events[n_events:], len(c.events)
+            if new:
+                with open(out / "mutes.jsonl", "a") as f:
+                    for s, e, g, prob, late in new:
+                        f.write(json.dumps({"start": round(s / c.sr, 3), "end": round(e / c.sr, 3),
+                                            "group": g, "prob": round(prob, 3), "late": bool(late)}) + "\n")
+            if stopping:
+                return
 
     def _clock(self, sr):
         last = time.perf_counter()
@@ -420,6 +478,9 @@ class Session:
         for s in streams:
             s.stop()
             s.close()
+        if self._saver:
+            self._saver.join(timeout=10)  # last part of the recording
+            self._saver = None
 
     def save_recording(self, path):
         import soundfile as sf
@@ -432,11 +493,14 @@ class Session:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--delay", type=float, help=f"seconds audio is held back (default {DEFAULT_DELAY}; detector 0.35)")
+    ap.add_argument("--delay", type=float, help=f"seconds audio is held back (default {DEFAULT_DELAY}; detector 0.4)")
     ap.add_argument("--step", type=float, help=f"seconds between checks (default {DEFAULT_STEP}; detector 0.05)")
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help="Whisper model (tiny.en, base.en, small.en, large-v3-turbo) or 'detector' (experimental)")
     ap.add_argument("--threshold", type=float, default=0.5, help="detector only: how sure before muting (0-1)")
+    ap.add_argument("--gate", default="off",
+                    help="detector only: mute only where speech is heard within K frames (K:S, or 'off')")
+    ap.add_argument("--save", metavar="DIR", help="also keep the incoming audio + mute decisions here (training data)")
     ap.add_argument("--pads", type=float, nargs=2, metavar=("BEFORE", "AFTER"),
                     help="seconds of silence added around each word (default 0.06 0.18; detector 0.06 0.02)")
     ap.add_argument("--words", default=str(HERE / "words.txt"))
@@ -449,12 +513,14 @@ def main():
     args = ap.parse_args()
 
     det = args.model == DETECTOR
-    args.delay = args.delay or (0.35 if det else DEFAULT_DELAY)
+    args.delay = args.delay or (0.4 if det else DEFAULT_DELAY)
     args.step = args.step or (0.05 if det else DEFAULT_STEP)
     pads = args.pads or ((0.06, 0.02) if det else (0.06, 0.18))
     session = Session(model=args.model, delay=args.delay, step=args.step, words=args.words, output=args.output,
                       switch_default=not args.no_switch, play=not args.no_speaker, record=bool(args.record),
-                      verbose=args.verbose, pad_before=pads[0], pad_after=pads[1], threshold=args.threshold)
+                      verbose=args.verbose, pad_before=pads[0], pad_after=pads[1], threshold=args.threshold,
+                      gate=None if args.gate == "off" else (int(args.gate.split(":")[0]), float(args.gate.split(":")[1])),
+                      save_dir=args.save)
 
     # Also restore the speakers if the console window is closed instead of Ctrl+C.
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)
