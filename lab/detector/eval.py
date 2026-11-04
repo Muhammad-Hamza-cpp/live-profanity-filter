@@ -1,0 +1,197 @@
+r"""Replay audio through the detector on a simulated clock (real GPU timings) and score it.
+
+For every curse word: the delay it needs to be silent before it plays. At fixed delays: curse
+words silenced, clean words left intact, and sound-alike words ("duck", "count", ...) left intact.
+Loudness-based, never re-transcribed (see docs/low-latency-research.md).
+
+    .venv-lab\Scripts\python lab\detector\eval.py runs\v1\head.pt
+    .venv-lab\Scripts\python lab\detector\eval.py runs\v1\head.pt --thr 0.3 0.5 0.7 --step 0.05
+"""
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+HERE = Path(__file__).resolve().parent
+ROOT = HERE.parent.parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(HERE))
+from detector import FRAME, SR, WINDOW, Detector  # noqa: E402
+from lexicon import NEGATIVES  # noqa: E402
+
+GRID = 0.01  # seconds
+DELAYS = (0.25, 0.30, 0.35, 0.40)
+NEG = {w.lower() for w in NEGATIVES if " " not in w}
+
+
+def run(det, audio, step):
+    """Probabilities seen at every check: list of (time ready, window start, probs)."""
+    out, t, times = [], step, []
+    while t * SR <= len(audio):
+        end = int(t * SR)
+        t0 = time.perf_counter()
+        p = det.probs(audio[max(0, end - int(WINDOW * SR)):end])
+        took = time.perf_counter() - t0
+        times.append(took)
+        out.append((t + took, t - WINDOW, p))
+        t = max(t + step, t + took)
+    return out, times
+
+
+def first_mute(checks, n_grid, thr, pad_before, pad_after, confirm=1):
+    """For each 10 ms grid point: earliest time a check decided to mute it (inf = never).
+    confirm=K: only once K checks in a row put it above the threshold (filters one-check spikes)."""
+    g = np.full(n_grid, np.inf)
+    run_len = np.zeros(n_grid, np.int32)
+    for ready, w0, p in checks:
+        above = np.zeros(n_grid, bool)
+        for f in np.nonzero(p.max(-1) > thr)[0]:
+            s = w0 + f * FRAME
+            if s >= ready:  # frame not heard yet
+                continue
+            lo = max(0, int((s - pad_before) / GRID))
+            hi = min(n_grid, int((s + FRAME + pad_after) / GRID) + 1)
+            above[lo:hi] = True
+        seen = slice(max(0, int((w0 - pad_before) / GRID)), min(n_grid, int((ready + pad_after) / GRID) + 1))
+        run_len[seen] = np.where(above[seen], run_len[seen] + 1, 0)
+        hit = run_len >= confirm
+        g[hit] = np.minimum(g[hit], ready)
+    return g
+
+
+def score(audio, words, g):
+    """words: [(word, is_curse, start_s, end_s)] -> per-curse needed delay, intact fractions."""
+    x = np.arange(len(g)) * GRID
+    need = []
+    for w, curse, s, e in words:
+        if curse:
+            i = np.arange(int(s / GRID), max(int(s / GRID) + 1, int(e / GRID)))
+            i = i[i < len(g)]
+            need.append(float(np.max(g[i] - x[i])) if len(i) else np.inf)
+    res = {"need": need}
+    for d in DELAYS:
+        muted = g <= x + d
+        gain = np.repeat(~muted, int(GRID * SR)).astype(np.float32)
+        gain = np.pad(gain, (0, max(0, len(audio) - len(gain))), constant_values=1)[:len(audio)]
+        heard = audio * gain
+
+        def kept(s, e):
+            a, b = int(s * SR), max(int(s * SR) + 1, int(e * SR))
+            return np.sqrt(np.mean(heard[a:b] ** 2)) / (np.sqrt(np.mean(audio[a:b] ** 2)) + 1e-9)
+        k = [(w, curse, kept(s, e)) for w, curse, s, e in words]
+        res[d] = {
+            "silent": sum(v < 0.2 for _, c, v in k if c), "curse": sum(c for _, c, _ in k),
+            "intact": sum(v > 0.7 for _, c, v in k if not c), "clean": sum(not c for _, c, _ in k),
+            "neg_intact": sum(v > 0.7 for w, c, v in k if not c and _norm(w) in NEG),
+            "neg": sum(1 for w, c, _ in k if not c and _norm(w) in NEG),
+            "muted_s": float(np.sum(muted)) * GRID,
+        }
+    return res
+
+
+def _norm(w):
+    return "".join(ch for ch in w.lower() if ch.isalpha() or ch == "'").strip("'")
+
+
+def bench_clips():
+    """The three bench.py clips; reference words from Whisper small.en like bench.py does."""
+    from bench import TEST, load16, reference_words
+    from censor import add_cuda_dlls, is_profane, load_words
+    add_cuda_dlls()
+    from faster_whisper import WhisperModel
+    patterns = load_words(ROOT / "words.txt")
+    clips = {k: load16(TEST / f"bench_{k}.wav") for k in ("normal", "fast", "noisy")}
+    judge = WhisperModel("small.en", device="cuda", compute_type="float16")
+    out = {}
+    for k, a in clips.items():
+        ref = reference_words(judge, clips["fast" if k == "fast" else "normal"])
+        out[f"bench-{k}"] = (np.concatenate([a, np.zeros(SR, np.float32)]),
+                             [(w, is_profane(w, patterns), s, e) for w, s, e in ref])
+    del judge
+    return out
+
+
+def tts_streams(n_streams=4, per_stream=120, seed=0, split="test", prefix="tts"):
+    """Held-out Piper voices/speakers, utterances joined with pauses into long streams."""
+    data = sorted((ROOT / "data" / "tts" / split).glob("shard_*.json"))
+    utts = []
+    for p in data:
+        z = np.load(p.with_suffix(".npz"))
+        audio, off = z["audio"], z["offsets"]  # each z[...] access re-reads the whole array
+        for i, m in enumerate(json.loads(p.read_text())):
+            utts.append((audio[off[i]:off[i + 1]].copy(), m))
+    rng = np.random.default_rng(seed)
+    order = rng.permutation(len(utts))
+    out = {}
+    for s in range(n_streams):
+        parts, words, pos = [], [], 0
+        for j in order[s * per_stream:(s + 1) * per_stream]:
+            a, m = utts[j]
+            words += [(w, g is not None, (pos + a0) / SR, (pos + a1) / SR) for w, g, a0, a1 in m["words"]]
+            gap = int(rng.uniform(0.2, 1.0) * SR)
+            parts += [a.astype(np.float32) / 32767, np.zeros(gap, np.float32)]
+            pos += len(a) + gap
+        out[f"{prefix}-{s}"] = (np.concatenate(parts), words)
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("head")
+    ap.add_argument("--thr", type=float, nargs="+", default=[0.3, 0.5, 0.7])
+    ap.add_argument("--step", type=float, default=0.05)
+    ap.add_argument("--pad", type=float, nargs=2, default=[0.0, 0.0], metavar=("BEFORE", "AFTER"))
+    ap.add_argument("--sets", default="bench,tts,ctx")
+    ap.add_argument("--confirm", type=int, nargs="+", default=[1], help="checks in a row needed to mute")
+    args = ap.parse_args()
+
+    sets = {}
+    if "bench" in args.sets:
+        sets.update(bench_clips())
+    if "tts" in args.sets:
+        sets.update(tts_streams())
+    if "ctx" in args.sets:  # curse-word contexts with clean words in the slot: anything muted is wrong
+        sets.update(tts_streams(n_streams=2, per_stream=200, split="test_ctx", prefix="ctx"))
+    det = Detector(HERE / args.head if not Path(args.head).is_absolute() else args.head)
+    checks = {}
+    all_times = []
+    for name, (audio, _) in sets.items():
+        checks[name], tm = run(det, audio, args.step)
+        all_times += tm
+    print(f"step {args.step} s | {1000 * np.mean(all_times):.1f} ms per check "
+          f"(p99 {1000 * np.percentile(all_times, 99):.1f}) | pads {args.pad}")
+
+    for thr, confirm in [(t, c) for c in args.confirm for t in args.thr]:
+        print(f"\n=== threshold {thr}, {confirm} check(s) in a row ===")
+        for group in ("bench", "tts", "ctx"):
+            names = [n for n in sets if n.startswith(group)]
+            if not names:
+                continue
+            need, agg = [], {d: {} for d in DELAYS}
+            for n in names:
+                audio, words = sets[n]
+                g = first_mute(checks[n], int(len(audio) / SR / GRID) + 1, thr, *args.pad, confirm)
+                r = score(audio, words, g)
+                need += r["need"]
+                for d in DELAYS:
+                    for k, v in r[d].items():
+                        agg[d][k] = agg[d].get(k, 0) + v
+            need = np.array(need)
+            dur = sum(len(sets[n][0]) for n in names) / SR
+            fin = need[np.isfinite(need)]
+            print(f"[{group}] {len(need)} curse words, missed {int(np.sum(~np.isfinite(need)))} | needed delay: "
+                  f"median {np.median(fin):.2f}  p95 {np.percentile(fin, 95):.2f}  "
+                  f"p99 {np.percentile(fin, 99):.2f}  max {fin.max():.2f}" if len(fin) else f"[{group}] nothing detected")
+            for d in DELAYS:
+                a = agg[d]
+                print(f"   at {d:.2f} s: curse silent {a['silent']}/{a['curse']}  "
+                      f"clean intact {a['intact']}/{a['clean']} ({a['intact'] / max(a['clean'], 1):.1%})  "
+                      f"sound-alikes intact {a['neg_intact']}/{a['neg']}  "
+                      f"muted {a['muted_s'] / dur * 60:.1f} s/min")
+
+
+if __name__ == "__main__":
+    main()
