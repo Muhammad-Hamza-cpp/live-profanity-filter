@@ -51,6 +51,39 @@ class Data:
         return self.audio[s:s + n].astype(np.float32) / 32767, words
 
 
+class Sounds:
+    """Non-speech sound effects (ESC-50: engines, fireworks, sirens, glass, thunder ...). Folds 1-4
+    are for training; fold 5 is kept for eval.py. The detector has to learn these aren't speech."""
+
+    def __init__(self, folds):
+        import csv
+        import soundfile as sf
+        from scipy.signal import resample_poly
+        root = HERE.parent.parent / "data" / "esc50_dl" / "ESC-50-master"
+        self.clips = []
+        if not root.exists():
+            print("ESC-50 not found - training without sound effects", flush=True)
+            return
+        for r in csv.DictReader(open(root / "meta" / "esc50.csv")):
+            if int(r["fold"]) in folds:
+                a, sr = sf.read(root / "audio" / r["filename"], dtype="float32")
+                a = resample_poly(a, SR, sr).astype(np.float32)
+                nz = np.nonzero(np.abs(a) > 1e-3)[0]  # many clips are padded with digital silence
+                if len(nz):
+                    self.clips.append(a[nz[0]:nz[-1] + 1] / (np.abs(a).max() + 1e-9))
+        print(f"sound effects: {len(self.clips)} clips from ESC-50 folds {folds}", flush=True)
+
+    def stream(self, n, rng):
+        """n samples of back-to-back random clips, sometimes with gaps."""
+        out, pos = np.zeros(n, np.float32), 0
+        while self.clips and pos < n:
+            c = self.clips[rng.integers(len(self.clips))] * rng.uniform(0.2, 1.0)
+            k = min(len(c), n - pos)
+            out[pos:pos + k] = c[:k]
+            pos += k + int(rng.uniform(0, 0.5) * SR) * (rng.random() < 0.5)
+        return out
+
+
 # ---------- augmentation ----------
 
 def colored_noise(n, rng):
@@ -77,8 +110,10 @@ def chords(n, rng):
 
 def augment(x, data, rng):
     if rng.random() < 0.6:
-        kind = rng.choice(["noise", "music", "babble"])
-        if kind == "noise":
+        kind = rng.choice(["noise", "music", "babble", "sfx", "sfx"] if data.sounds.clips else ["noise", "music", "babble"])
+        if kind == "sfx":
+            bg = data.sounds.stream(len(x), rng).astype(np.float64)
+        elif kind == "noise":
             bg = colored_noise(len(x), rng)
         elif kind == "music":
             bg = chords(len(x), rng) + 0.3 * colored_noise(len(x), rng)
@@ -91,7 +126,7 @@ def augment(x, data, rng):
                 if hi > lo:
                     bg[lo:hi] += b[lo - o:hi - o]
         rms = np.sqrt(np.mean(x[np.abs(x) > 0.01] ** 2)) if np.any(np.abs(x) > 0.01) else 0.1
-        snr = rng.uniform(0, 25) if kind != "babble" else rng.uniform(6, 25)
+        snr = {"babble": rng.uniform(6, 25), "sfx": rng.uniform(-5, 20)}.get(kind, rng.uniform(0, 25))
         bg *= rms / (bg.std() + 1e-9) / 10 ** (snr / 20)
         x = x + bg
     if rng.random() < 0.25:  # room reverb
@@ -110,6 +145,11 @@ def augment(x, data, rng):
 
 def example(data, rng, aug=True):
     """One window and its (frames, groups) labels + loss mask."""
+    if data.sounds.clips and rng.random() < 0.15:  # no speech at all: nothing may be muted
+        x = data.sounds.stream(N + int(rng.uniform(0, 2) * SR), rng)
+        if aug:
+            x = augment(x, data, rng)
+        return x[-N:], [], len(x) - N, len(x)
     ids = [data.curse[rng.integers(len(data.curse))] if rng.random() < 0.7 else rng.integers(len(data.utts))]
     ids = [rng.integers(len(data.utts))] * rng.integers(0, 2) + ids + [rng.integers(len(data.utts))]
     parts, words, pos = [], [], int(rng.uniform(0, 0.5) * SR)
@@ -119,7 +159,11 @@ def example(data, rng, aug=True):
         words += [(g, pos + s, pos + e) for g, s, e in ws]
         parts.append(a)
         gap = int(rng.uniform(0.0, 0.6) * SR)
-        parts.append(np.zeros(gap, np.float32))
+        if data.sounds.clips and rng.random() < 0.3:  # a sound effect between sentences
+            gap = int(rng.uniform(0.2, 1.2) * SR)
+            parts.append(data.sounds.stream(gap, rng) * rng.uniform(0.1, 0.8))
+        else:
+            parts.append(np.zeros(gap, np.float32))
         pos += len(a) + gap
     x = np.concatenate(parts)
     curse = [(s, e) for g, s, e in words if g >= 0]
@@ -196,6 +240,7 @@ def main():
 
     torch.manual_seed(0)
     train, test = Data(args.train), Data("test")
+    train.sounds, test.sounds = Sounds({1, 2, 3, 4}), Sounds({5})
     fe, encoder = load_encoder()
     head = Head().cuda()
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=0.01)
