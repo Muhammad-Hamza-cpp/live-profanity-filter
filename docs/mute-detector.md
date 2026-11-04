@@ -2,7 +2,12 @@
 
 **Goal:** keep the worst-case audio delay **under 0.4 s** while still silencing every curse word. The app on `main` holds audio back 1.2 s (Whisper `small.en`), or 0.8 s in "Low lag" mode. [low-latency-research.md](low-latency-research.md) got Parakeet CTC down to about 0.5–0.65 s. Every transcribe-then-match approach waits until a word has been fully recognised, so this branch trains a model that answers one question for each 80 ms frame: *is this part of a curse word?* No transcript is involved.
 
-**Status (2026-11-04):**
+**Update (later on 2026-11-04):**
+- In a first Call of Duty session, v2 blocked every real swear word but fired often on game sound.
+- **v3**, trained with sound effects as negatives, mutes 91% less on held-out non-speech audio.
+- The app now uses **v3 at 0.40 s**. See "First game test" and "v3" in section 4.
+
+**Status (2026-11-04, v2):**
 - On held-out synthetic voices, the trained detector (v2) silences **234/235 curse words at a 0.40 s delay** (233 at 0.35 s). Each check costs **12.8 ms** on an RTX 4050 Laptop GPU.
 - It is in the desktop app as an **experimental** mode, for live testing. It is **not ready to replace the default**: it still mutes about 1 in 5 sound-alike words ("duck", "count", …). It also clips 7.5% of clean words, against 5–8% for Whisper `small.en`.
 - Every result so far comes from text-to-speech. Nothing has been measured on real speech yet.
@@ -147,6 +152,46 @@ The detector is in the desktop app as **"Ultra-low lag - trained detector (exper
 Gaming caveats:
 - A game shares the GPU, so a check can take longer than 12 ms. If the log shows `LATE`, raise the delay.
 - The detector uses about 1.1 GB of VRAM.
+
+### First game test: Call of Duty MW4 (v2, 0.35 s)
+
+- **Every real swear word was blocked.**
+- **Too many false positives:** about 300 mutes in 16 minutes, many in slur groups nobody said. The model was reacting to game sound (gunfire, explosions, music), which it had never heard: all its training audio was synthetic voices over simple synthetic noise.
+- **About 3 in 4 mutes were marked `LATE`.** The app now logs check timings every 30 s, so the next session will show whether the game is starving the GPU.
+
+### Speech gate (tried, not used)
+
+A frame may only be muted where Parakeet's own CTC layer hears speech (P(non-blank) > S within K frames). Parakeet's CTC output only commits near the end of a word, so the gate makes curse words late. Results on v2 at threshold 0.5, 2 checks, 0.35 s; non-speech = ESC-50:
+
+| Gate | Non-speech muted | Held-out voices silent | Clean intact |
+|---|---|---|---|
+| off | 1.2 s/min | 235/235 | 85.4% |
+| K=2, S=0.5 | 0.0 s/min | 210/235 | 93.4% |
+| K=3, S=0.3 | 0.1 s/min | 224/235 | 90.1% |
+| K=5, S=0.3 | 0.2 s/min | 228/235 | 87.5% |
+
+It is still available (`--gate K:S`), but off by default.
+
+### v3: sound effects as negatives
+
+The v2 recipe, plus **ESC-50** environmental sounds (folds 1–4; fold 5 held out for eval) used three ways:
+- 15% of training windows are sound effects only, labelled all-clean
+- sound effects are one of the background types, at −5 to 20 dB SNR
+- sound effects fill some of the gaps between sentences
+
+Threshold 0.5, 2 checks, no gate:
+
+| | v2 | v3 |
+|---|---|---|
+| **Non-speech (ESC-50 fold 5) muted** | 1.1 s/min | **0.1 s/min** |
+| Bench: silent at 0.35 / 0.40 s | 28 / 29 of 30 | 29 / **30** of 30 |
+| Held-out voices: silent at 0.35 s | 235/235 | 234/235 |
+| Clean intact (held-out voices) | 85.4% | 85.5% |
+| Context set: clean intact | 80.8% | 79.0% |
+
+Through VB-Cable (`selftest.py --model detector`), v3 is borderline at 0.35 s: one run left "shit" at 22% loudness, one run left "crap" at 18%. At **0.40 s** two runs were clean: 6/6 at 0% and 0 late. **The app now uses v3 at 0.40 s.** ESC-50 is not game audio, though, so the next CoD session decides.
+
+**Recording mode:** the app's "Save audio for training" checkbox (CLI: `--save DIR`) keeps the incoming audio as 16 kHz FLAC parts plus every mute decision (`mutes.jsonl`) under `data/recordings/`, on this PC only. Game sessions labelled offline by Whisper large-v3 are the next training data.
 
 ## 5. Lessons and gotchas
 
