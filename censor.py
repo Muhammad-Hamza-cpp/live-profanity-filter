@@ -23,6 +23,10 @@ import numpy as np
 
 HERE = Path(__file__).resolve().parent
 HELPER = HERE / "audio_default.ps1"
+# Experimental trained detector (docs/mute-detector.md): needs the lab environment (torch).
+DETECTOR = "detector"
+DETECTOR_DIR = HERE / "lab" / "detector"
+DETECTOR_HEAD = DETECTOR_DIR / "models" / "detector-v2.pt"
 # Tuned with bench.py / bench_padding.py: small.en never needed more than 0.76 s, so 1.2 s leaves margin.
 DEFAULT_MODEL = "small.en"
 DEFAULT_DELAY = 1.2   # seconds
@@ -93,8 +97,10 @@ def mask(word):
 
 class Censor:
     def __init__(self, model, patterns, sr, channels, delay, pad_before=0.06, pad_after=0.18,
-                 window=4.0, step=0.4, verbose=False, log=log, on_mute=None, shift=0.0):
+                 window=4.0, step=0.4, verbose=False, log=log, on_mute=None, shift=0.0,
+                 threshold=0.5, confirm=2):
         self.model, self.patterns = model, patterns
+        self.threshold, self.confirm = threshold, confirm
         self.log, self.on_mute = log, on_mute
         self.sr, self.ch = sr, channels
         self.delay = int(delay * sr)
@@ -203,6 +209,71 @@ class Censor:
                     if self.on_mute:
                         self.on_mute()
 
+    def detect_forever(self):
+        """Trained detector instead of a transcript: every step, score each 80 ms frame of the
+        last 4 s, and mute audio that stays above the threshold for `confirm` checks in a row."""
+        from scipy.signal import resample_poly
+        from detector import FRAME, GROUP_NAMES, WINDOW
+        groups = [i for i, g in enumerate(GROUP_NAMES) if g in enabled_groups(self.patterns)]
+        win, frame, grid = int(WINDOW * self.sr), int(FRAME * self.sr), int(0.01 * self.sr)
+        runs = {}  # 10 ms grid index -> checks in a row above the threshold
+        done = 0
+        while not self.stop.is_set():
+            end = self.write_pos
+            if end - done < self.step:
+                time.sleep(0.002)
+                continue
+            done = end
+            audio = self._read(end - win, end).mean(axis=1)
+            if np.sqrt(np.mean(audio[-self.step:] ** 2)) < 1e-4:  # silence
+                runs = {}
+                continue
+            t0 = time.perf_counter()
+            p = self.model.probs(resample_poly(audio, self.up, self.down).astype(np.float32))[:, groups]
+            took = time.perf_counter() - t0
+            above = {}
+            for f in np.nonzero(p.max(-1) > self.threshold)[0]:
+                s = end - win + f * frame
+                if s >= end:  # not heard yet
+                    continue
+                for i in range(s // grid, (s + frame) // grid):
+                    above[i] = groups[int(p[f].argmax())]
+            lo = (end - win) // grid
+            runs = {i: runs.get(i, 0) + 1 for i in above if i >= lo}
+            hit = sorted(i for i, n in runs.items() if n >= self.confirm)
+            if self.verbose and took > self.step:
+                self.log(f"check took {took * 1000:.0f} ms (> step) - GPU busy?")
+            # contiguous runs of grid points -> mute ranges
+            spans, start = [], None
+            for a, b in zip(hit, hit[1:] + [None]):
+                start = a if start is None else start
+                if b != a + 1:
+                    spans.append((start, a, above[start]))
+                    start = None
+            for a, b, g in spans:
+                s = a * grid - int(self.pad_before * self.sr)
+                e = (b + 1) * grid + int(self.pad_after * self.sr)
+                if e < self.play_pos - self.sr // 2:
+                    continue  # a flicker on audio that played long ago, not a late word
+                if self.add_mute(s, e):
+                    self.muted_count += 1
+                    margin = (s - self.play_pos) / self.sr
+                    name = mask(GROUP_NAMES[g])
+                    if margin < 0:
+                        self.late_count += 1
+                        self.log(f"muted '{name}' LATE by {-margin:.2f}s - increase the delay")
+                    else:
+                        self.log(f"muted '{name}'" + (f" ({margin:.2f}s to spare)" if self.verbose else ""))
+                    if self.on_mute:
+                        self.on_mute()
+
+
+def enabled_groups(patterns):
+    """Detector groups whose words are still in words.txt (comment a word out to allow it)."""
+    from lexicon import GROUPS
+    return {g for g, (_, forms) in GROUPS.items()
+            if any(is_profane(f, patterns) for f in forms if " " not in f)}
+
 
 # ---------- session (shared by the app and the command line) ----------
 
@@ -210,7 +281,18 @@ _models = {}
 
 
 def load_model(name, log=log):
-    """Load (once) and warm up a Whisper model. Returns (model, 'GPU' or 'CPU')."""
+    """Load (once) and warm up a Whisper model (or the detector). Returns (model, 'GPU' or 'CPU')."""
+    if name == DETECTOR and name not in _models:
+        sys.path.insert(0, str(DETECTOR_DIR))
+        try:
+            from detector import Detector
+        except ImportError as e:
+            raise RuntimeError(f"The detector needs the lab environment (.venv-lab, see app-lab.bat): {e}")
+        if not DETECTOR_HEAD.exists():
+            raise RuntimeError(f"Trained detector not found: {DETECTOR_HEAD}")
+        log("Loading the trained detector (Parakeet encoder + head) ...")
+        os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+        _models[name] = (Detector(DETECTOR_HEAD), "GPU")  # captures a CUDA graph = warmed up
     if name not in _models:
         add_cuda_dlls()
         from faster_whisper import WhisperModel
@@ -244,9 +326,10 @@ class Session:
 
     def __init__(self, model=DEFAULT_MODEL, delay=DEFAULT_DELAY, step=DEFAULT_STEP, words=HERE / "words.txt",
                  output=None, switch_default=True, play=True, record=False, verbose=False,
-                 log=log, on_mute=None, pad_before=0.06, pad_after=0.18):
+                 log=log, on_mute=None, pad_before=0.06, pad_after=0.18, threshold=0.5, confirm=2):
         self.model_name, self.delay, self.step, self.words = model, delay, step, words
         self.pads = pad_before, pad_after
+        self.threshold, self.confirm = threshold, confirm
         self.output, self.switch_default, self.play, self.record = output, switch_default, play, record
         self.verbose, self.log, self.on_mute = verbose, log, on_mute
         self.censor, self.streams, self.recorded = None, [], []
@@ -280,7 +363,8 @@ class Session:
         model, where = load_model(self.model_name, self.log)
         self.censor = Censor(model, load_words(self.words), sr, channels, self.delay, *self.pads, step=self.step,
                              verbose=self.verbose, log=self.log, on_mute=self.on_mute,
-                             shift=TIMESTAMP_SHIFT.get(self.model_name, 0.0))
+                             shift=TIMESTAMP_SHIFT.get(self.model_name, 0.0),
+                             threshold=self.threshold, confirm=self.confirm)
 
         def on_input(indata, frames, t, status):
             self.censor.push(indata)
@@ -299,7 +383,8 @@ class Session:
                                                 callback=on_output, extra_settings=settings))
         for s in self.streams:
             s.start()
-        threading.Thread(target=self.censor.transcribe_forever, daemon=True).start()
+        loop = self.censor.detect_forever if self.model_name == DETECTOR else self.censor.transcribe_forever
+        threading.Thread(target=loop, daemon=True).start()
         if self.record and not self.play:  # no output device to pace us: render on our own clock
             threading.Thread(target=self._clock, args=(sr,), daemon=True).start()
         if self.switch_default:
@@ -347,9 +432,13 @@ class Session:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--delay", type=float, default=DEFAULT_DELAY, help=f"seconds audio is held back (default {DEFAULT_DELAY})")
-    ap.add_argument("--step", type=float, default=DEFAULT_STEP, help=f"seconds between checks (default {DEFAULT_STEP})")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help="Whisper model (tiny.en, base.en, small.en, large-v3-turbo)")
+    ap.add_argument("--delay", type=float, help=f"seconds audio is held back (default {DEFAULT_DELAY}; detector 0.35)")
+    ap.add_argument("--step", type=float, help=f"seconds between checks (default {DEFAULT_STEP}; detector 0.05)")
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help="Whisper model (tiny.en, base.en, small.en, large-v3-turbo) or 'detector' (experimental)")
+    ap.add_argument("--threshold", type=float, default=0.5, help="detector only: how sure before muting (0-1)")
+    ap.add_argument("--pads", type=float, nargs=2, metavar=("BEFORE", "AFTER"),
+                    help="seconds of silence added around each word (default 0.06 0.18; detector 0.06 0.02)")
     ap.add_argument("--words", default=str(HERE / "words.txt"))
     ap.add_argument("--output", help="part of your speaker/headphone name (default: your current default device)")
     ap.add_argument("--no-switch", action="store_true", help="don't change the Windows default device")
@@ -359,9 +448,13 @@ def main():
     ap.add_argument("--verbose", action="store_true", help="print everything that is transcribed")
     args = ap.parse_args()
 
+    det = args.model == DETECTOR
+    args.delay = args.delay or (0.35 if det else DEFAULT_DELAY)
+    args.step = args.step or (0.05 if det else DEFAULT_STEP)
+    pads = args.pads or ((0.06, 0.02) if det else (0.06, 0.18))
     session = Session(model=args.model, delay=args.delay, step=args.step, words=args.words, output=args.output,
                       switch_default=not args.no_switch, play=not args.no_speaker, record=bool(args.record),
-                      verbose=args.verbose)
+                      verbose=args.verbose, pad_before=pads[0], pad_after=pads[1], threshold=args.threshold)
 
     # Also restore the speakers if the console window is closed instead of Ctrl+C.
     @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_uint)

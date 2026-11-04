@@ -1,4 +1,5 @@
 """Audio Censor - small desktop app around censor.Session (Start/Stop, settings, activity log)."""
+import importlib.util
 import json
 import os
 import queue
@@ -7,7 +8,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from censor import HERE, Session, ps_helper, playback_devices, real_speakers
+from censor import DETECTOR, DETECTOR_HEAD, HERE, Session, ps_helper, playback_devices, real_speakers
 
 SETTINGS = HERE / "settings.json"
 
@@ -21,6 +22,10 @@ PRESETS = {
     "Most accurate - heavy GPU, videos only":
         {"model": "large-v3-turbo", "step": 0.4, "delay": 1.5, "pad_before": 0.06, "pad_after": 0.18},
 }
+# Trained frame detector (docs/mute-detector.md). Only offered when it can run: lab environment + weights.
+if DETECTOR_HEAD.exists() and importlib.util.find_spec("torch"):
+    PRESETS["Ultra-low lag - trained detector (experimental)"] = {
+        "model": DETECTOR, "step": 0.05, "delay": 0.35, "pad_before": 0.06, "pad_after": 0.02, "threshold": 0.5}
 
 
 class App:
@@ -60,10 +65,10 @@ class App:
 
         ttk.Label(frm, text="Delay").grid(row=4, column=0, sticky="w", pady=3, padx=(0, 10))
         self.delay = tk.DoubleVar(value=self.settings.get("delay", next(iter(PRESETS.values()))["delay"]))
-        self.delay_scale = ttk.Scale(frm, from_=0.8, to=4.0, variable=self.delay,
-                                     command=lambda _: self.delay_label.config(text=f"{self.delay.get():.1f} s"))
+        self.delay_scale = ttk.Scale(frm, from_=0.3, to=4.0, variable=self.delay,
+                                     command=lambda _: self.delay_label.config(text=f"{self.delay.get():.2f} s"))
         self.delay_scale.grid(row=4, column=1, sticky="ew", pady=3)
-        self.delay_label = ttk.Label(frm, text=f"{self.delay.get():.1f} s", width=6)
+        self.delay_label = ttk.Label(frm, text=f"{self.delay.get():.2f} s", width=6)
         self.delay_label.grid(row=4, column=2, sticky="w", padx=(6, 0))
 
         row = ttk.Frame(frm)
@@ -93,7 +98,7 @@ class App:
 
     def save_settings(self):
         SETTINGS.write_text(json.dumps({"speaker": self.speaker.get(), "preset": self.preset.get(),
-                                        "delay": round(self.delay.get(), 1)}, indent=2))
+                                        "delay": round(self.delay.get(), 2)}, indent=2))
 
     def refresh_speakers(self):
         devs = playback_devices()
@@ -111,7 +116,7 @@ class App:
 
     def on_preset(self, _=None):
         self.delay.set(PRESETS[self.preset.get()]["delay"])
-        self.delay_label.config(text=f"{self.delay.get():.1f} s")
+        self.delay_label.config(text=f"{self.delay.get():.2f} s")
 
     # ---- start / stop ----
     def toggle(self):
@@ -127,8 +132,9 @@ class App:
             p = PRESETS[self.preset.get()]
             self.muted = 0
             self.count_label.config(text="Muted this session: 0")
-            self.session = Session(model=p["model"], step=p["step"], delay=round(self.delay.get(), 1),
+            self.session = Session(model=p["model"], step=p["step"], delay=round(self.delay.get(), 2),
                                    pad_before=p["pad_before"], pad_after=p["pad_after"],
+                                   threshold=p.get("threshold", 0.5),
                                    output=self.speaker.get() or None,
                                    log=lambda m: self.events.put(("log", m)),
                                    on_mute=lambda: self.events.put(("mute", None)))
