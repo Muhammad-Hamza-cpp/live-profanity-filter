@@ -1,0 +1,17 @@
+# Mute-detector lab (see docs/mute-detector.md). Same .venv-lab as lab/requirements-lab.txt, but
+# WITHOUT onnx-asr / onnxruntime-gpu: piper-tts needs the CPU onnxruntime, and the two shadow
+# each other. Install torch first from the CUDA index:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+# Versions are what the experiments were run with (torch 2.11.0+cu128).
+transformers==5.22.1
+accelerate==1.15.0
+librosa==1.0.0
+faster-whisper==1.2.1
+piper-tts==1.8.0
+onnx==1.23.2
+soundfile
+scipy
+numpy
+sounddevice
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

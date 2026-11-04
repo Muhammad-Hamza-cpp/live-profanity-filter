@@ -4,3 +4,7 @@ __pycache__/
 settings.json
 test/
 .venv-lab/
+data/
+lab/detector/voices/
+lab/detector/runs/
+*.log
