@@ -58,10 +58,14 @@ Last updated **2026-11-05**. Pick up from here. For background, [mute-detector.m
 - **Expected story:** many v3 mutes are real swears in dialogue; the rest are clean dialogue (including non-English lines) and some pure game sound.
 - **Privacy and licence:** this is copyrighted game audio and may include other players' voices. Keep it local and never publish or commit it.
 
-## 5. Uncommitted changes (as of this handoff)
-- `censor.py`: the recorder no longer writes parts that are digital silence.
-- `lab/detector/review_recording.py`: new (see §4).
-- `docs/related-work-and-datasets.md`, `docs/HANDOFF.md`, `CLAUDE.md`: new docs.
+## 5. Git state
+Everything is committed and pushed to `origin/research/mute-detector`. The latest additions:
+- the recorder skips silent parts
+- `review_recording.py`
+- the related-work doc
+- this handoff and `CLAUDE.md`
+
+Only gitignored data and logs are local-only (§9).
 
 ## 6. Licence and IP flags
 - **ESC-50 is CC BY-NC.** v3 was trained on it, so **treat `detector-v3.pt` as research-only.** Retrain on **MUSAN (CC BY 4.0)** plus **FSD50K clips licensed CC0/CC BY** (filter per clip; includes gunshots and explosions).
