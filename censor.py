@@ -441,10 +441,12 @@ class Session:
             start = max(saved, end - c.size + c.sr)  # never older than the ring buffer still holds
             if end - start > c.sr // 10:  # skip a near-empty last part
                 a = resample_poly(c._read(start, end).mean(axis=1), c.up, c.down).astype(np.float32)
-                sf.write(out / f"{part:04d}.flac", a, 16000)
-                with open(out / "parts.jsonl", "a") as f:
-                    f.write(json.dumps({"file": f"{part:04d}.flac", "start": start / c.sr}) + "\n")
-                part, saved = part + 1, end
+                if np.abs(a).max() > 1e-4:  # nothing playing (game closed, menus): don't keep silence
+                    sf.write(out / f"{part:04d}.flac", a, 16000)
+                    with open(out / "parts.jsonl", "a") as f:
+                        f.write(json.dumps({"file": f"{part:04d}.flac", "start": start / c.sr}) + "\n")
+                    part += 1
+                saved = end
             new, n_events = c.events[n_events:], len(c.events)
             if new:
                 with open(out / "mutes.jsonl", "a") as f:
