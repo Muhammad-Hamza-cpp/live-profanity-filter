@@ -1,114 +1,120 @@
 # Handoff: state of the mute-detector work
 
-Last updated **2026-11-05**. Pick up from here. For background, [mute-detector.md](mute-detector.md) is the full research report and [related-work-and-datasets.md](related-work-and-datasets.md) covers literature and licences.
+Last updated **2026-11-06**. Pick up from here. Other docs:
+- [real-speech.md](real-speech.md): the latest work (real-speech test set, training on real speech, v4).
+- [mute-detector.md](mute-detector.md): v1–v3 on synthetic speech.
+- [related-work-and-datasets.md](related-work-and-datasets.md): literature and licences.
 
 ## 1. What the user wants
 - **Goal:** worst-case audio delay **under 0.4 s**, with every curse word silenced. The app's default is 1.2 s (Whisper `small.en`).
 - **Main concerns after playing Call of Duty MW4 with it:** **false positives** (muting game sound and clean dialogue) and **latency** (`LATE` mutes).
 - **Also interested in:**
-  - a possible **research paper** (arXiv first, then a workshop or Interspeech)
-  - **LinkedIn** posts (figures exist; a draft post was given in chat)
+  - a **research paper** (arXiv first, then a workshop or Interspeech)
+  - **LinkedIn** posts (figures exist in `docs/images/`)
   - training only on **copyright-safe data**
+- **Decision (2026-11-05): the paper uses public data only.** Game recordings are **not** used for training or for reported results, because nobody else can get them and the results couldn't be reproduced. A game session can appear at most as a private, qualitative case study.
+- **Decision (2026-11-05): automatic checks only.** The user does not want to listen to clips or hand-check labels. Use model agreement (aligner + Whisper) instead.
 
-## 2. What exists (branch `research/mute-detector`, pushed up to `86f0eaf`)
+## 2. Current state (2026-11-06)
+- **App:** the "Ultra-low lag" preset uses **v4** (`lab/detector/models/detector-v4.pt`) at threshold **0.7** (`DETECTOR_THRESHOLD` in `censor.py`) and a delay of **0.40 s**.
+  - VB-Cable self-test: PASS at 0.40 s (6/6, 0 late); FAIL at 0.35 s ("shit" kept 24% loudness).
+  - The user is about to test it in a game.
+- **Real speech** (details and every number in [real-speech.md](real-speech.md)), at 0.40 s:
+  - **Test set:** 450 curse words + 13,172 clean words from 306 YouTube videos (YODAS2, CC BY 3.0), labelled by MMS alignment + Whisper large-v3 agreement.
+  - **Synthetic + real training** (3 seeds): **93.0%** of curse words silenced, **95.0%** of clean words intact, 3.5 s muted per minute.
+  - **v3:** 93.8% silenced but only 82.0% intact, 9.7 s/min.
+  - **Whisper `small.en` at 0.40 s:** 15.3% silenced. It needs 1.2 s to reach 90%.
+  - **Parakeet gap-fill at 0.40 s:** 75.8% silenced.
+  - **Learning curve:** synthetic only → +500 → +2,000 → +all 3,477 real curse words. Most of the gain comes from the first 500.
+  - **Ablations** (unheard labels, no context negatives, no sound effects): flat within seed noise on real speech.
+- **Lambda:** the instance (gpu_1x_a10, 150.230.34.10) was **terminated automatically at 04:14 on 2026-11-06** after the results were pulled.
+  - The persistent filesystem **`Audio`** (`/lambda/nfs/Audio/lpf`) still holds all clips, labels, runs and model caches. It costs storage money; delete it in the Lambda dashboard once nothing more is needed from it.
+  - Everything important is also on the laptop in `data/lambda_backup/` (gitignored).
+
+## 3. What exists (branch `research/mute-detector`)
 
 | Piece | Where |
 |---|---|
-| Training vocabulary: 41 groups, 268 curse forms, 345 sound-alike negatives; consistency check vs `words.txt` | `lab/detector/lexicon.py`, `words.txt` |
-| Sentence generator (curse / context / negative / clean) | `lab/detector/corpus.py` |
-| Piper TTS data with exact word boundaries, parallel shards, train/test voice split, `merge_map` for espeak-merged words | `lab/detector/make_tts.py` |
-| Model: frozen Parakeet CTC 0.6B encoder (blocks 12/16/20/24) + 0.93M head → P(frame in curse word) for each of 41 groups, every 80 ms; CUDA graph (~12 ms/check); `score()` also returns CTC speech probability | `lab/detector/detector.py` |
-| Training: 4 s windows, heard-only labels, augmentation (noise/music/babble/ESC-50 effects/reverb/phone band), 15% sound-effects-only windows | `lab/detector/train.py` |
-| Evaluation on a simulated live loop, scored by loudness; sets `bench` (SAPI voices), `tts` (held-out Piper voices), `ctx` (context negatives), `esc` (ESC-50 fold 5) | `lab/detector/eval.py` |
-| False-mute diagnosis | `lab/detector/diag_fp.py` |
-| App engine in real time without devices | `lab/detector/live_sim.py` |
-| App integration: `Censor.detect_forever`, preset, timing log every 30 s, device rescan on Start, "Save audio for training" (FLAC parts + `mutes.jsonl`) | `censor.py`, `app.pyw`, `app-lab.bat` |
-| Trained heads (3.7 MB each) | `lab/detector/models/detector-v2.pt`, **`detector-v3.pt` (what the app uses)** |
-| LinkedIn/README figures (1200×1500) | `lab/detector/figures.py` → `docs/images/01..06-*.png` |
+| Training vocabulary: 41 groups, 268 curse forms, 345 sound-alike negatives | `lab/detector/lexicon.py`, `words.txt` |
+| Synthetic speech: sentence generator + Piper TTS with exact word boundaries | `lab/detector/corpus.py`, `make_tts.py` |
+| Model: frozen Parakeet CTC 0.6B encoder + 0.93M head → per-80 ms-frame curse probability for 41 groups; CUDA graph (~12 ms/check) | `lab/detector/detector.py` |
+| Training (synthetic + optional real clips, ablation flags, crash-safe resume) | `lab/detector/train.py` |
+| Live-loop evaluation scored by loudness; sets `bench`, `tts`, `ctx`, `esc`, **`real`**; fixed check time (`--check-ms`) and a batched path | `lab/detector/eval.py` |
+| Real-speech pipeline: transcript scan → clip fetch → MMS align → Whisper check → splits by video | `scan_transcripts.py`, `fetch_yodas.py`, `align_clips.py`, `verify_whisper.py`, `build_testset.py`, `build_trainset.py` (all in `lab/detector/`) |
+| Baselines on real speech (Whisper `small.en`, Parakeet gap-fill) | `lab/detector/eval_baselines.py` |
+| Per-run / per-group results with thresholds picked on validation | `lab/detector/summarize_runs.py` |
+| Lambda scripts: env, data, TTS, labelling, split, job queue, eval queue, resume | `lab/lambda/` |
+| Laptop tools: two-machine dashboard, 30-min Lambda backup, finish watcher (pull → summary → terminate → shutdown) | `lab/dashboard.py`, `lab/backup_lambda.sh`, `lab/finish_and_shutdown.sh` |
+| App integration | `censor.py` (`detect_forever`), `app.pyw`, `app-lab.bat` |
+| Trained heads (3.7 MB each) | `lab/detector/models/detector-v2.pt`, `detector-v3.pt`, **`detector-v4.pt` (what the app uses)** |
+| Figures (v1–v3 era) | `lab/detector/figures.py` → `docs/images/01..06-*.png` |
+| Game-session review tool (deprioritized) | `lab/detector/review_recording.py` |
 
-**App defaults** for the detector: v3, delay **0.40 s**, step 0.05 s, threshold 0.5, 2 checks in a row, pads 0.06/0.02 s, **speech gate off**.
+## 4. Next steps (in order)
+1. **The user plays a game with v4** and reports false mutes and leaks. This is qualitative only and stays private.
+2. **Thresholds above 0.7:** most runs picked 0.7, the top of the grid searched. Re-run the validation eval at 0.7–0.9 on the `data/lambda_backup` checkpoints (laptop GPU), then re-score the test set once.
+3. **Paper figures:**
+   - delay vs. silenced vs. clean-intact curves (detector, Whisper, Parakeet)
+   - learning curve over N real words
+   - results per category (strong / mild / British / slur)
+4. **Second test source:** People's Speech (fix the source-ID parsing in `scan_transcripts.py`). This keeps the claim from resting on one dataset.
+5. **A model that can be used commercially:** retrain without ESC-50 (CC BY-NC) using MUSAN / CC0 FSD50K, and audit the 29 Piper voices' licences. `abl_nosfx` shows dropping ESC-50 costs almost nothing on real speech.
+6. **Onsets:** 0.35 s still leaks the start of some words. Try a start-offset regression in the head, or finer frames.
+7. **Paper draft (LaTeX):** method, test set construction, baselines, learning curve, ablations, latency on a laptop GPU, limitations. The limitations include automatic labels with about 87% precision on a pilot, one dataset, and anonymised video IDs, so a speaker could be in both training and test.
+8. **App polish:** category toggles and a threshold slider. Avoid the add/delete/on-off word-list dialog claimed in US 12,300,222 (§6).
 
-## 3. Key results (details in mute-detector.md)
-- **Baseline on this laptop:**
-  - Whisper `small.en`: 0.77 s worst case.
-  - Parakeet gap-fill: 0.66 s.
-  - With a CUDA graph a Parakeet check costs ~12 ms instead of ~50 ms. A smaller step does **not** lower the worst case, which is set by when the transcript commits.
-- **v1:** guessed from context: 69% of its false mutes fired within 0.1 s of the audio arriving. Cause: labels on frames not yet heard. **Fix (v2):** heard-only labels, plus 15k context-negative sentences.
-- **v2:**
-  - 235/235 held-out TTS curse words silenced at 0.35 s, with pads 0.06/0.02.
-  - **First CoD session:** every real swear word blocked, but about 19 mutes a minute, mostly on game sound.
-- **Speech gate** (CTC speech probability): cuts non-speech mutes by 85–100% but makes words late. Off by default.
-- **v3:** ESC-50 sound effects as negatives.
-  - Non-speech mutes: **1.1 → 0.1 s/min**.
-  - Bench: 30/30 at 0.40 s.
-  - VB-Cable self-test: borderline at 0.35 s (one word kept 22% loudness), clean at **0.40 s** (6/6, 0 late).
+## 5. Old thread: review of the second game session (deprioritized)
+- **Recording:** `data/recordings/20261104-163523/`, about 32.5 min of CoD campaign audio with v3 at 0.35 s, 148 mutes.
+- **Tool:** `lab/detector/review_recording.py` re-transcribes it with Whisper large-v3 in 10 s windows (5 s hop, no VAD) and classifies each mute. It was interrupted before finishing.
+- **Status:** not needed for the paper (§1 decision). Only worth finishing if the user wants a private sanity check of game behaviour.
+- **Privacy:** copyrighted game audio, possibly other players' voices. Keep it local; never publish or commit it.
 
-## 4. Open thread: review of the second game session (interrupted)
-- **Recording:** `data/recordings/20261104-163523/`. About 32.5 min of real game audio, a **Call of Duty campaign with lots of dialogue and swearing, including some Spanish and French lines**. Then about 33 min of digital silence after the game stopped (parts ~65–130). It ran at 0.35 s; it's almost certainly v3 (the app started at 16:35, after v3 went in). **148 mutes**, 57% marked late.
-- **The tool is `lab/detector/review_recording.py` (uncommitted).** It transcribes the recording with Whisper large-v3 and classifies every mute as caught / false in speech / false with no speech / missed, and writes clips to `review/`.
-- **What's been learned about the reference transcript:**
-  - Whisper **with VAD** drops most dialogue under game sound. **The first conclusion, "88% of mutes on non-speech", was wrong.**
-  - **One long pass without VAD** drops whole stretches too (only 5 curse words found).
-  - **Short clips without VAD** work. Re-transcribing the 130 "no speech" mute regions one by one found confident speech in 104 of them and real swearing in 22 ("get that skinny fuck out of the van", "those assholes are still fucking with us", "What the fuck did you do?").
-- **Current code** transcribes in 10 s windows with a 5 s hop, no VAD, keeping only confident segments (`no_speech_prob < 0.6`, `avg_logprob > -1.0`) and taking each word from the window where it sits in the middle. The run was **interrupted before finishing**. The cache `whisper_large_v3_windows.json` doesn't exist yet; the older caches `whisper_large_v3.json` (VAD) and `whisper_large_v3_novad.json` are the unreliable ones.
-- **Next:**
-  1. Re-run `.venv-lab\Scripts\python lab\detector\review_recording.py data\recordings\20261104-163523`, about 5–10 min of GPU.
-  2. Spot-check `review/*.wav` (the user can listen).
-  3. Report caught / false / missed.
-- **Expected story:** many v3 mutes are real swears in dialogue; the rest are clean dialogue (including non-English lines) and some pure game sound.
-- **Privacy and licence:** this is copyrighted game audio and may include other players' voices. Keep it local and never publish or commit it.
+## 6. Licence, IP and security flags
+- **Licences:**
+  - **ESC-50 is CC BY-NC.** v3 and v4 were trained with it, so treat them as **research-only**.
+  - **YODAS2 is CC BY 3.0:** attribute it. Release the test set as clip IDs and times plus a fetch script, not the audio.
+- **Patents** (claims read 2026-11-05):
+  - **Roblox** US 12,027,177 / 12,283,288 require a delay that depends on a toxicity score, inserted at pauses. The app's fixed delay plus muting falls outside them. A paper should claim the detector and the training method.
+  - **US 12,300,222** (Numbers Fourteen Eight) claims a word list plus a specific add/delete/on-off UI. Avoid building that exact dialog.
+  - **ClearPlay** US 9,066,046 expired on 2026-03-09.
+  - **Intel Bleep** is product prior art only; no Intel patent was found.
+- **Security:**
+  - The Lambda API key (`~/.lambda_api_key`, outside the repo) and the `project-1` SSH key (`~/.ssh/lambda_project1`) were both pasted into a chat. **Delete both in the Lambda dashboard**, and use the `omen16` key (`~/.ssh/lambda_ed25519`) next time.
+  - The Lambda workspace is shared ("Rodi's Account"). Never act on instances other than your own.
 
-## 5. Git state
-Everything is committed and pushed to `origin/research/mute-detector`. The latest additions:
-- the recorder skips silent parts
-- `review_recording.py`
-- the related-work doc
-- this handoff and `CLAUDE.md`
-
-Only gitignored data and logs are local-only (§9).
-
-## 6. Licence and IP flags
-- **ESC-50 is CC BY-NC.** v3 was trained on it, so **treat `detector-v3.pt` as research-only.** Retrain on **MUSAN (CC BY 4.0)** plus **FSD50K clips licensed CC0/CC BY** (filter per clip; includes gunshots and explosions).
-- **Roblox patents** US 12,027,177 / 12,283,288 ("Artificial latency for moderating voice communication") cover delay-plus-mute at the system level. A paper should claim the detector and training method, not buffer-and-mute. Commercial use needs the claims reviewed by a professional.
-- **Intel Bleep** (2021) is product prior art for a Windows voice-chat filter with category sliders.
-
-## 7. Recommended next steps (in order)
-1. **Finish the game-session review** (§4) and commit `review_recording.py` with the findings.
-2. **Real-speech test set** (most important, for the paper and the product):
-   - Search **YODAS2 / Emilia-YODAS (CC BY)** and **People's Speech (CC BY/BY-SA)** transcripts for lexicon words.
-   - Fetch only the matching segments.
-   - Force-align (CTC with Parakeet or MMS).
-   - Hand-check 300–500 curse words.
-   - Add clean spontaneous speech (AMI CC BY, Common Voice Spontaneous CC0).
-3. **v4 on copyright-safe data:**
-   - MUSAN plus CC0/CC BY FSD50K instead of ESC-50.
-   - Non-English negatives (Multilingual LibriSpeech CC BY, VoxPopuli CC0), because game dialogue includes Spanish and French.
-   - Some real positives (Google's TTS-KWS paper: a few thousand real clips close most of the synthetic-to-real gap).
-   - Private game recordings as negatives and a private eval set, labelled by windowed Whisper large-v3.
-4. **Onsets:** v3 at 0.35 s sometimes leaks the first ~60 ms. Try a start-offset regression in the head, or finer frames.
-5. **Paper:**
-   - baselines: Whisper + word list, Parakeet gap-fill, a streaming CTC keyword spotter, MuTox
-   - curves of delay vs. recall vs. clean-word collateral
-   - three seeds, and the ablation list in related-work-and-datasets.md §3
-6. **App polish:** category toggles and a threshold slider in the UI.
-
-## 8. Commands
+## 7. Commands
 ```powershell
 $env:TRANSFORMERS_VERBOSITY="error"
 .venv-lab\Scripts\python lab\detector\lexicon.py                                   # vocab vs words.txt
-.venv-lab\Scripts\python lab\detector\make_tts.py --split train --utts 40000     # ~30 min, 12 CPU workers
-.venv-lab\Scripts\python lab\detector\train.py --name v4 --steps 8000 --train train,train_ctx   # ~20 min
-.venv-lab\Scripts\python lab\detector\eval.py runs\v4\head.pt --thr 0.5 --confirm 2 --pad 0.06 0.02 --sets bench,tts,ctx,esc
+.venv-lab\Scripts\python lab\detector\eval.py models\detector-v4.pt --sets real --thr 0.7 --confirm 2 --pad 0.06 0.02 --check-ms 13
+.venv-lab\Scripts\python lab\detector\eval_baselines.py whisper parakeet
+.venv-lab\Scripts\python lab\detector\summarize_runs.py data\lambda_backup\files\lab\detector\runs
 .venv-lab\Scripts\python selftest.py 0.4 --model detector                        # through VB-Cable, nothing played aloud
-.venv-lab\Scripts\python lab\detector\review_recording.py data\recordings\<session>
-.venv-lab\Scripts\python lab\detector\figures.py
 ```
-To ship a new head, copy `runs\vN\head.pt` to `lab\detector\models\detector-vN.pt` and point `DETECTOR_HEAD` in `censor.py` at it. Then re-run the selftest at 0.35 and 0.40 s.
+The real-speech pipeline and the Lambda run are in [real-speech.md §8](real-speech.md#8-reproduce). Synthetic data and v1–v3 training are in [mute-detector.md §7](mute-detector.md#7-reproduce).
 
-## 9. Data on disk (gitignored, about 7 GB)
-- `data/tts/{train, train_ctx, test, test_ctx}`: 40k + 15k + 2k + 1k Piper utterances; `.npz` audio plus `.json` word labels.
+**To ship a new head:**
+1. Strip the run's `last.pt` to `{head, groups, step, args}` and save it as `lab/detector/models/detector-vN.pt`.
+2. Point `DETECTOR_HEAD` (and `DETECTOR_THRESHOLD`) in `censor.py` at it.
+3. Re-run the self-test at 0.35 and 0.40 s.
+
+## 8. Data on disk (gitignored)
+- `data/tts/{train, train_ctx, test, test_ctx}`: Piper utterances.
 - `data/esc50_dl/ESC-50-master/`
-- `data/recordings/20261104-163523/`
+- `data/realspeech/`: transcript-scan hits (`hits_yodas.jsonl`, `hits_peoples.jsonl`) and `yodas/`, which holds:
+  - the test clips (`clips/`)
+  - `clips.jsonl`, `aligned.jsonl`, `whisper.jsonl`
+  - `testset.jsonl`, `split_videos.json`
+- `data/lambda_backup/files/`: everything pulled from Lambda except the training clips:
+  - the 22 runs with `last.pt`, `head.pt`, training and eval logs
+  - `trainset.jsonl`, `valset.jsonl`, labels
+  - the pipeline logs
+- `data/recordings/20261104-163523/`: private game audio.
 - `lab/detector/voices/`: 29 Piper voices.
-- `lab/detector/runs/v1..v3/`: checkpoints and training logs. Eval logs are in the repo root (`eval_*.log`, `train_*.log`).
-- The bench clips are in `test/` (made by `bench.py`).
+- `lab/detector/runs/`: local v1–v3 runs.
+- `results_overnight.txt`, `results_summary.md`: overnight result summaries (repo root, untracked).
+
+## 9. Git
+- Everything above is committed on `research/mute-detector` and pushed.
+- `main` is the shipped Whisper app; don't change it unless asked.
+- The GitHub repo `Muhammad-Hamza-cpp/live-profanity-filter` was made **private** on 2026-11-06.

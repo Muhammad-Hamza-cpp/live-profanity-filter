@@ -32,7 +32,17 @@ To try it:
 1. Install the lab environment (see [docs/mute-detector.md](docs/mute-detector.md#7-reproduce)).
 2. Start **`app-lab.bat`** and choose **"Ultra-low lag - trained detector (experimental)"**.
 
-It's experimental: it was trained on synthetic speech, and it still clips some clean words next to curse words. The full write-up covers how the training data was made, every result, what went wrong and what's next: **[docs/mute-detector.md](docs/mute-detector.md)**.
+The mode uses **v4**, trained on synthetic speech plus real public YouTube speech. On a test set of 450 real curse words from 306 videos, at 0.40 s of delay:
+
+| | Curse words silenced | Clean words left intact |
+|---|---|---|
+| **v4 (this mode)** | **93%** | **95%** |
+| Whisper `small.en` (the normal mode's engine) at the same 0.40 s | 15% | 99% |
+| Whisper `small.en` at 1.2 s (the normal mode) | 90% | 96% |
+
+Details: [docs/real-speech.md](docs/real-speech.md).
+
+It's still experimental, and it hasn't been measured on game audio. The full write-up covers how the training data was made, every result, what went wrong and what's next: **[docs/mute-detector.md](docs/mute-detector.md)**.
 
 ## Requirements
 

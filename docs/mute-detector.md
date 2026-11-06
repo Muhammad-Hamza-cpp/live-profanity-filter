@@ -10,6 +10,14 @@
 
 More figures: [latency](images/03-latency.png) · [training data](images/04-training-data.png) · [CUDA graph](images/06-cuda-graph.png). All are 1200×1500 PNGs, rendered by [`figures.py`](../lab/detector/figures.py) from the numbers in this report.
 
+**Update (2026-11-06): real speech and v4. See [real-speech.md](real-speech.md).**
+- There is now a test set of 450 real curse words from 306 public YouTube videos (YODAS2), labelled automatically.
+- On real speech at 0.40 s, v3 silences 94% of curse words but clips 18% of clean words.
+- Mixing real speech into training (21 runs on a Lambda A10) keeps 93% silenced and clips only 5% of clean words. Muting drops from 9.7 to 3.5 s a minute.
+- For comparison, Whisper `small.en` silences 15% at 0.40 s and Parakeet gap-fill 76%.
+- The app now uses **v4** (`detector-v4.pt`, threshold 0.7, 0.40 s).
+- The rest of this report is about v1–v3 and synthetic speech.
+
 **Update (later on 2026-11-04):**
 - In a first Call of Duty session, v2 blocked every real swear word but fired often on game sound.
 - **v3**, trained with sound effects as negatives, mutes 91% less on held-out non-speech audio.
@@ -213,6 +221,8 @@ Through VB-Cable (`selftest.py --model detector`), v3 is borderline at 0.35 s: o
 
 ## 6. Next steps
 
+*As of 2026-11-06, item 4 (real-speech test set) and item 5 (real training data) are done. Game audio (item 1) is no longer used for training, after the 2026-11-05 decision to use public data only. The current list is in [real-speech.md §9](real-speech.md#9-open-items).*
+
 1. **Game audio (next):** play with "Save audio for training" on, then label the recordings offline with Whisper large-v3, using full context and no time pressure. Train v4 on that alongside the synthetic data. ESC-50 isn't gunfire or game music; real sessions are.
 2. **Onsets:** settle on the pre-pad, or train the head to also predict a start offset within the frame. Frames are 80 ms, which is coarse, and onsets are why v3 is borderline at 0.35 s.
 3. **Precision (v4+):** unfreeze the top 2–4 encoder blocks (about 25M parameters each) with gradient checkpointing, and weight sound-alike and context negatives more heavily in the loss. Regenerate `train` with the `merge_map` fix and the 4-kind sentence mix.
@@ -247,7 +257,12 @@ $env:TRANSFORMERS_VERBOSITY="error"
 .venv-lab\Scripts\python lab\detector\figures.py                      # docs\images\*.png (needs matplotlib)
 ```
 
-Data (`data/`), voices and training runs (`lab/detector/runs/`) are gitignored. The heads are committed under `lab/detector/models/`, 3.7 MB each: `detector-v3.pt` is what the app uses, and `detector-v2.pt` is the one from the first game test.
+Data (`data/`), voices and training runs (`lab/detector/runs/`) are gitignored. The heads are committed under `lab/detector/models/`, 3.7 MB each:
+- `detector-v4.pt` is what the app uses: trained with real speech, see [real-speech.md](real-speech.md).
+- `detector-v3.pt` is the synthetic-only model.
+- `detector-v2.pt` is the one from the first game test.
+
+The real-speech pipeline and the Lambda scripts are reproduced in [real-speech.md §8](real-speech.md#8-reproduce).
 
 | File | Purpose |
 |---|---|
@@ -262,3 +277,7 @@ Data (`data/`), voices and training runs (`lab/detector/runs/`) are gitignored. 
 | `lab/detector/live_sim.py` | The app's engine in real time without audio devices, scored like `selftest.py` |
 | `censor.py` (`detect_forever`), `app.pyw`, `app-lab.bat` | The detector as an app mode and its launcher; check timings, saving audio for training |
 | `lab/detector/figures.py`, `docs/images/` | Summary figures (1200×1500 PNG) |
+| `lab/detector/scan_transcripts.py`, `fetch_yodas.py`, `align_clips.py`, `verify_whisper.py` | Real speech: find curse words in public transcripts, cut the clips, align and check them |
+| `lab/detector/build_testset.py`, `build_trainset.py`, `make_review.py` | Real-speech test / training / validation splits by video; optional listening page |
+| `lab/detector/eval_baselines.py`, `summarize_runs.py` | Whisper / Parakeet baselines on real speech; per-run and per-group results with validation thresholds |
+| `lab/lambda/`, `lab/dashboard.py`, `lab/backup_lambda.sh`, `lab/finish_and_shutdown.sh` | Cloud runs: setup, labelling, job queue, eval queue, resume; laptop dashboard, backup, finish watcher |
