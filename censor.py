@@ -26,7 +26,8 @@ HELPER = HERE / "audio_default.ps1"
 # Experimental trained detector (docs/mute-detector.md): needs the lab environment (torch).
 DETECTOR = "detector"
 DETECTOR_DIR = HERE / "lab" / "detector"
-DETECTOR_HEAD = DETECTOR_DIR / "models" / "detector-v3.pt"
+DETECTOR_HEAD = DETECTOR_DIR / "models" / "detector-v4.pt"
+DETECTOR_THRESHOLD = 0.7  # chosen for v4 on real validation speech (lab/detector/summarize_runs.py)
 # Tuned with bench.py / bench_padding.py: small.en never needed more than 0.76 s, so 1.2 s leaves margin.
 DEFAULT_MODEL = "small.en"
 DEFAULT_DELAY = 1.2   # seconds
@@ -499,7 +500,8 @@ def main():
     ap.add_argument("--step", type=float, help=f"seconds between checks (default {DEFAULT_STEP}; detector 0.05)")
     ap.add_argument("--model", default=DEFAULT_MODEL,
                     help="Whisper model (tiny.en, base.en, small.en, large-v3-turbo) or 'detector' (experimental)")
-    ap.add_argument("--threshold", type=float, default=0.5, help="detector only: how sure before muting (0-1)")
+    ap.add_argument("--threshold", type=float, default=DETECTOR_THRESHOLD,
+                    help=f"detector only: how sure before muting (0-1, default {DETECTOR_THRESHOLD})")
     ap.add_argument("--gate", default="off",
                     help="detector only: mute only where speech is heard within K frames (K:S, or 'off')")
     ap.add_argument("--save", metavar="DIR", help="also keep the incoming audio + mute decisions here (training data)")

@@ -8,7 +8,8 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from censor import DETECTOR, DETECTOR_HEAD, HERE, Session, ps_helper, playback_devices, real_speakers
+from censor import (DETECTOR, DETECTOR_HEAD, DETECTOR_THRESHOLD, HERE, Session, ps_helper, playback_devices,
+                    real_speakers)
 
 SETTINGS = HERE / "settings.json"
 
@@ -25,8 +26,8 @@ PRESETS = {
 # Trained frame detector (docs/mute-detector.md). Only offered when it can run: lab environment + weights.
 if DETECTOR_HEAD.exists() and importlib.util.find_spec("torch"):
     PRESETS["Ultra-low lag - trained detector (experimental)"] = {
-        "model": DETECTOR, "step": 0.05, "delay": 0.4, "pad_before": 0.06, "pad_after": 0.02, "threshold": 0.5,
-        "gate": None}
+        "model": DETECTOR, "step": 0.05, "delay": 0.4, "pad_before": 0.06, "pad_after": 0.02,
+        "threshold": DETECTOR_THRESHOLD, "gate": None}
 RECORDINGS = HERE / "data" / "recordings"
 
 
