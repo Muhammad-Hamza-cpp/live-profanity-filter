@@ -8,3 +8,5 @@ data/
 lab/detector/voices/
 lab/detector/runs/
 *.log
+results_overnight.txt
+results_summary.*
