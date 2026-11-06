@@ -1,0 +1,3 @@
+c0_s1 --train train,train_ctx --real 0 --seed 1 --steps 8000
+c0_s2 --train train,train_ctx --real 0 --seed 2 --steps 8000
+c0_s3 --train train,train_ctx --real 0 --seed 3 --steps 8000

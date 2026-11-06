@@ -1,0 +1,22 @@
+c0_s1 --train train,train_ctx --real 0 --seed 1 --steps 8000
+c0_s2 --train train,train_ctx --real 0 --seed 2 --steps 8000
+c0_s3 --train train,train_ctx --real 0 --seed 3 --steps 8000
+c500_s1 --train train,train_ctx --real 500 --seed 1 --steps 8000
+c500_s2 --train train,train_ctx --real 500 --seed 2 --steps 8000
+c500_s3 --train train,train_ctx --real 500 --seed 3 --steps 8000
+c2000_s1 --train train,train_ctx --real 2000 --seed 1 --steps 8000
+c2000_s2 --train train,train_ctx --real 2000 --seed 2 --steps 8000
+c2000_s3 --train train,train_ctx --real 2000 --seed 3 --steps 8000
+call_s1 --train train,train_ctx --real -1 --seed 1 --steps 8000
+call_s2 --train train,train_ctx --real -1 --seed 2 --steps 8000
+call_s3 --train train,train_ctx --real -1 --seed 3 --steps 8000
+# ablations on the all-real recipe: one change each
+abl_unheard_s1 --train train,train_ctx --real -1 --label-unheard --seed 1 --steps 8000
+abl_unheard_s2 --train train,train_ctx --real -1 --label-unheard --seed 2 --steps 8000
+abl_unheard_s3 --train train,train_ctx --real -1 --label-unheard --seed 3 --steps 8000
+abl_noctx_s1 --train train --real -1 --seed 1 --steps 8000
+abl_noctx_s2 --train train --real -1 --seed 2 --steps 8000
+abl_noctx_s3 --train train --real -1 --seed 3 --steps 8000
+abl_nosfx_s1 --train train,train_ctx --real -1 --no-sfx --seed 1 --steps 8000
+abl_nosfx_s2 --train train,train_ctx --real -1 --no-sfx --seed 2 --steps 8000
+abl_nosfx_s3 --train train,train_ctx --real -1 --no-sfx --seed 3 --steps 8000
