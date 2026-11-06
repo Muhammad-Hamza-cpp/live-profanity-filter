@@ -27,18 +27,45 @@ DELAYS = (0.25, 0.30, 0.35, 0.40)
 NEG = {w.lower() for w in NEGATIVES if " " not in w}
 
 
-def run(det, audio, step):
-    """Probabilities seen at every check: list of (time ready, window start, probs)."""
+def run(det, audio, step, check_s=None):
+    """Probabilities seen at every check: list of (time ready, window start, probs).
+    check_s: use this fixed time per check instead of the measured one, so results don't depend
+    on the GPU the evaluation happens to run on (13 ms = the RTX 4050 laptop)."""
     out, t, times = [], step, []
     while t * SR <= len(audio):
         end = int(t * SR)
         t0 = time.perf_counter()
         p, speech = det.score(audio[max(0, end - int(WINDOW * SR)):end])
-        took = time.perf_counter() - t0
+        took = check_s if check_s is not None else time.perf_counter() - t0
         times.append(took)
         out.append((t + took, t - WINDOW, p, speech))
         t = max(t + step, t + took)
     return out, times
+
+
+def run_batched(det, audio, step, check_s, batch=32):
+    """Same checks as run() with a fixed check time, many windows per GPU call. With the check
+    time fixed, check k happens at step + k * max(step, check_s) whatever the GPU, so the windows
+    don't depend on each other. ~20x faster; for scoring many models."""
+    import torch
+    from detector import encode, features
+    n, ts, t = int(WINDOW * SR), [], step
+    while t * SR <= len(audio):  # the same float steps as run(): a 1-sample shift changes the frames
+        ts.append(t)
+        t = max(t + step, t + check_s)
+    out = []
+    for i in range(0, len(ts), batch):
+        ws = []
+        for t in ts[i:i + batch]:
+            w = audio[max(0, int(t * SR) - n):int(t * SR)].astype(np.float32)
+            ws.append(np.concatenate([np.zeros(n - len(w), np.float32), w]) if len(w) < n else w)
+        f, m = features(det.fe, ws, det.device)
+        with torch.inference_mode():
+            states, last = encode(det.encoder, f, m, last=True)
+            p = torch.sigmoid(det.head(states)).float().cpu().numpy()
+            speech = (1 - torch.softmax(det.ctc(last).float(), -1)[..., det.blank]).cpu().numpy()
+        out += [(t + check_s, t - WINDOW, pp, ss) for t, pp, ss in zip(ts[i:i + batch], p, speech)]
+    return out, [check_s] * len(out)
 
 
 def first_mute(checks, n_grid, thr, pad_before, pad_after, confirm=1, gate=None):
@@ -68,7 +95,7 @@ def first_mute(checks, n_grid, thr, pad_before, pad_after, confirm=1, gate=None)
     return g
 
 
-def score(audio, words, g):
+def score(audio, words, g, delays=DELAYS):
     """words: [(word, is_curse, start_s, end_s)] -> per-curse needed delay, intact fractions."""
     x = np.arange(len(g)) * GRID
     need = []
@@ -78,7 +105,7 @@ def score(audio, words, g):
             i = i[i < len(g)]
             need.append(float(np.max(g[i] - x[i])) if len(i) else np.inf)
     res = {"need": need}
-    for d in DELAYS:
+    for d in delays:
         muted = g <= x + d
         gain = np.repeat(~muted, int(GRID * SR)).astype(np.float32)
         gain = np.pad(gain, (0, max(0, len(audio) - len(gain))), constant_values=1)[:len(audio)]
@@ -160,6 +187,27 @@ def tts_streams(n_streams=4, per_stream=120, seed=0, split="test", prefix="tts")
     return out
 
 
+def real_streams(name="testset.jsonl", per_stream=100):
+    """Real speech: YODAS2 (CC BY) clips from build_testset.py (or valset.jsonl from
+    build_trainset.py, for tuning), joined with 0.5 s gaps. Each clip starts 4 s before its
+    transcript line, so the detector's window holds real preceding speech. Only words inside the
+    line are scored; the context around it has no labels."""
+    import soundfile as sf
+    path = ROOT / "data" / "realspeech" / "yodas" / name
+    rows = [json.loads(l) for l in path.open(encoding="utf-8")]
+    gap = np.zeros(int(0.5 * SR), np.float32)
+    out = {}
+    for s in range(0, len(rows), per_stream):
+        parts, words, pos = [], [], 0
+        for r in rows[s:s + per_stream]:
+            a, _ = sf.read(path.parent / r["clip"], dtype="float32")
+            words += [(w, kind == "curse", pos / SR + st, pos / SR + e) for w, kind, st, e in r["labels"]]
+            parts += [a, gap]
+            pos += len(a) + len(gap)
+        out[f"real-{s // per_stream}"] = (np.concatenate(parts), words)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("head")
@@ -167,6 +215,8 @@ def main():
     ap.add_argument("--step", type=float, default=0.05)
     ap.add_argument("--pad", type=float, nargs=2, default=[0.0, 0.0], metavar=("BEFORE", "AFTER"))
     ap.add_argument("--sets", default="bench,tts,ctx")
+    ap.add_argument("--real-file", default="testset.jsonl", help="valset.jsonl to tune, testset.jsonl to report")
+    ap.add_argument("--check-ms", type=float, help="fixed time per check (e.g. 13 = the laptop) instead of measured")
     ap.add_argument("--confirm", type=int, nargs="+", default=[1], help="checks in a row needed to mute")
     ap.add_argument("--gate", nargs="+", default=["none"],
                     help="speech gates to try: none, or K:S (CTC speech > S within K frames), e.g. 3:0.5")
@@ -181,11 +231,17 @@ def main():
         sets.update(esc_streams())
     if "ctx" in args.sets:  # curse-word contexts with clean words in the slot: anything muted is wrong
         sets.update(tts_streams(n_streams=2, per_stream=200, split="test_ctx", prefix="ctx"))
-    det = Detector(HERE / args.head if not Path(args.head).is_absolute() else args.head)
+    if "real" in args.sets:  # real speech (YODAS2); "muted" includes the unlabelled context around lines
+        sets.update(real_streams(args.real_file))
+    det = Detector(HERE / args.head if not Path(args.head).is_absolute() else args.head,
+                   graph=not args.check_ms)  # the batched path doesn't use the CUDA graph
     checks = {}
     all_times = []
     for name, (audio, _) in sets.items():
-        checks[name], tm = run(det, audio, args.step)
+        if args.check_ms:
+            checks[name], tm = run_batched(det, audio, args.step, args.check_ms / 1000)
+        else:
+            checks[name], tm = run(det, audio, args.step)
         all_times += tm
     print(f"step {args.step} s | {1000 * np.mean(all_times):.1f} ms per check "
           f"(p99 {1000 * np.percentile(all_times, 99):.1f}) | pads {args.pad}")
@@ -193,7 +249,7 @@ def main():
     gates = [None if g == "none" else (int(g.split(":")[0]), float(g.split(":")[1])) for g in args.gate]
     for thr, confirm, gate in [(t, c, g) for g in gates for c in args.confirm for t in args.thr]:
         print(f"\n=== threshold {thr}, {confirm} check(s) in a row, speech gate {gate} ===")
-        for group in ("bench", "tts", "ctx", "esc"):
+        for group in ("bench", "tts", "ctx", "esc", "real"):
             names = [n for n in sets if n.startswith(group)]
             if not names:
                 continue

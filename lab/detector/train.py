@@ -1,10 +1,17 @@
-r"""Train the detector head on the Piper data (encoder frozen).
+r"""Train the detector head on the Piper data (encoder frozen), optionally mixed with real speech.
 
 Each example is a WINDOW-second slice of a stream of 2-3 utterances that ends "now"; labels say,
 for every 80 ms frame in it, which curse group (if any) that frame is inside. Windows are often
 cut to end partway through a curse word, because that is where the decision has to be made early.
 
+Real speech (--real N): YODAS2 clips from build_trainset.py, about N curse words' worth of whole
+videos (-1 = all). A real window comes from one clip; only frames inside its transcript line
+(+-0.5 s) are in the loss, because the context around it is unlabelled. When valset.jsonl exists,
+the best checkpoint is picked on real validation speech, never on the test set.
+
     .venv-lab\Scripts\python lab\detector\train.py --name v1 --steps 6000
+    python lab/detector/train.py --name real2000-s1 --train train,train_ctx --real 2000 --seed 1
+Ablations: --label-unheard (v1's labels), --no-sfx, and --train train (no context negatives).
 """
 import argparse
 import json
@@ -26,6 +33,9 @@ RUNS = HERE / "runs"
 GIDX = {g: i for i, g in enumerate(GROUP_NAMES)}
 N = int(WINDOW * SR)
 MIN_OVERLAP = 0.02  # a frame counts as inside a word if it overlaps it by at least 20 ms
+REAL = HERE.parent.parent / "data" / "realspeech" / "yodas"
+LINE_MARGIN = 0.5   # words were aligned within the transcript line +- this; labels are complete there
+LABEL_UNHEARD = False  # ablation: label a curse word's frames before they are heard (v1)
 
 
 class Data:
@@ -49,6 +59,48 @@ class Data:
     def get(self, i):
         s, n, words = self.utts[i]
         return self.audio[s:s + n].astype(np.float32) / 32767, words
+
+
+class RealData:
+    """Real-speech clips (rows of trainset.jsonl / valset.jsonl). n_curse: take whole videos in
+    file order until they hold this many curse words (-1 = all, 0 = none)."""
+
+    def __init__(self, path, n_curse=-1):
+        import soundfile as sf
+        self.clips = []
+        if n_curse == 0 or not path.exists():
+            return
+        rows = [json.loads(l) for l in path.open(encoding="utf-8")]
+        n, videos = 0, set()
+        for r in rows:
+            if n_curse > 0 and n >= n_curse and r["src"] not in videos:
+                break
+            videos.add(r["src"])
+            a, _ = sf.read(REAL / r["clip"], dtype="float32")
+            words = [(GIDX[c["group"]], int(r["words"][c["i"]]["start"] * SR), int(r["words"][c["i"]]["end"] * SR))
+                     for c in r["curses"]]
+            valid = (int((r["line"][0] - LINE_MARGIN) * SR), int((r["line"][1] + LINE_MARGIN) * SR))
+            self.clips.append((a, words, valid))
+            n += len(words)
+        self.curse = [i for i, c in enumerate(self.clips) if c[1]]
+        print(f"{path.name}: {len(self.clips)} clips from {len(videos)} videos, {n} curse words", flush=True)
+
+    def example(self, rng, aug, tts):
+        """Like example(), from one real clip; tts supplies babble for augmentation."""
+        i = self.curse[rng.integers(len(self.curse))] if self.curse and rng.random() < 0.7 else rng.integers(len(self.clips))
+        a, words, (vs, ve) = self.clips[i]
+        if words and rng.random() < 0.6:
+            _, s, e = words[rng.integers(len(words))]
+            end = s + int(rng.uniform(-0.1, (e - s) / SR + 0.5) * SR)
+        else:
+            end = int(rng.uniform(max(vs, 0) + 0.3 * SR, ve + 0.5 * SR))
+        end = int(np.clip(end, int(0.3 * SR), len(a)))
+        x = augment(a, tts, rng) if aug else a
+        start = end - N
+        w = x[max(start, 0):end]
+        if start < 0:
+            w = np.concatenate([np.zeros(-start, np.float32), w])
+        return w, words, start, end, (vs, ve)
 
 
 class Sounds:
@@ -144,12 +196,14 @@ def augment(x, data, rng):
 # ---------- examples ----------
 
 def example(data, rng, aug=True):
-    """One window and its (frames, groups) labels + loss mask."""
+    """One window: (audio, curse words, start, end, labelled span or None)."""
+    if data.real.clips and rng.random() < data.real_p:
+        return data.real.example(rng, aug, data)
     if data.sounds.clips and rng.random() < 0.15:  # no speech at all: nothing may be muted
         x = data.sounds.stream(N + int(rng.uniform(0, 2) * SR), rng)
         if aug:
             x = augment(x, data, rng)
-        return x[-N:], [], len(x) - N, len(x)
+        return x[-N:], [], len(x) - N, len(x), None
     ids = [data.curse[rng.integers(len(data.curse))] if rng.random() < 0.7 else rng.integers(len(data.utts))]
     ids = [rng.integers(len(data.utts))] * rng.integers(0, 2) + ids + [rng.integers(len(data.utts))]
     parts, words, pos = [], [], int(rng.uniform(0, 0.5) * SR)
@@ -179,18 +233,25 @@ def example(data, rng, aug=True):
     w = x[max(start, 0):end]
     if start < 0:
         w = np.concatenate([np.zeros(-start, np.float32), w])
-    return w, words, start, end
+    return w, words, start, end, None
 
 
-def labels(words, start, end, frames):
+def labels(words, start, end, frames, valid=None):
+    """valid: (start, end) sample span where the labels are complete (real clips); frames outside
+    it are left out of the loss."""
     y = np.zeros((frames, len(GROUP_NAMES)), np.float32)
     t0 = start + np.arange(frames) * FRAME * SR
     t1 = t0 + FRAME * SR
     mask = ((t0 < end) & (t1 > max(start, 0))).astype(np.float32)  # heard, and not left padding
+    if valid is not None:
+        mask *= (t0 >= valid[0]) & (t1 <= valid[1])
     for g, s, e in words:
         if g < 0 or e <= start or s >= end:
             continue
         ov = np.minimum(t1, e) - np.maximum(t0, s)
+        if LABEL_UNHEARD:  # ablation: v1's labels, the whole word even where not yet heard
+            y[ov >= MIN_OVERLAP * SR, g] = 1
+            continue
         # Only what has been heard counts: a frame is a positive once 20 ms of the curse word in
         # it has been heard. Before that it is left out of the loss - neither "curse" (that taught
         # v1 to guess from context like "what the ...") nor "clean" (it may well be a curse word).
@@ -207,12 +268,12 @@ def producer(data, q, seed, batch, aug):
 
 
 def run_batch(fe, encoder, head, items, device="cuda"):
-    feats, amask = features(fe, [w for w, _, _, _ in items], device)
+    feats, amask = features(fe, [w for w, *_ in items], device)
     with torch.no_grad():
         states = encode(encoder, feats, amask)
     logits = head(states)
     frames = logits.shape[1]
-    ys, ms = zip(*[labels(ws, s, e, frames) for _, ws, s, e in items])
+    ys, ms = zip(*[labels(ws, s, e, frames, v) for _, ws, s, e, v in items])
     y = torch.from_numpy(np.stack(ys)).to(device)
     m = torch.from_numpy(np.stack(ms)).to(device)
     return logits, y, m
@@ -236,11 +297,20 @@ def main():
     ap.add_argument("--pos-weight", type=float, default=4.0)
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--train", default="train", help="comma-separated data splits")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--real", type=int, default=0, help="real curse words to train with (whole videos); -1 = all")
+    ap.add_argument("--real-p", type=float, default=0.3, help="share of training windows from real clips")
+    ap.add_argument("--label-unheard", action="store_true", help="ablation: v1's labels")
+    ap.add_argument("--no-sfx", action="store_true", help="ablation: no sound-effect negatives")
     args = ap.parse_args()
 
-    torch.manual_seed(0)
+    global LABEL_UNHEARD
+    LABEL_UNHEARD = args.label_unheard
+    torch.manual_seed(args.seed)
     train, test = Data(args.train), Data("test")
-    train.sounds, test.sounds = Sounds({1, 2, 3, 4}), Sounds({5})
+    train.sounds, test.sounds = Sounds(set() if args.no_sfx else {1, 2, 3, 4}), Sounds({5})
+    train.real, train.real_p = RealData(REAL / "trainset.jsonl", args.real), args.real_p
+    test.real, test.real_p = RealData(REAL / "valset.jsonl"), 1.0  # real validation, if there is one
     fe, encoder = load_encoder()
     head = Head().cuda()
     opt = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=0.01)
@@ -249,15 +319,24 @@ def main():
 
     q = queue.Queue(maxsize=16)
     for i in range(args.threads):
-        threading.Thread(target=producer, args=(train, q, i, args.batch, True), daemon=True).start()
+        threading.Thread(target=producer, args=(train, q, args.seed * 100 + i, args.batch, True), daemon=True).start()
     rng = np.random.default_rng(12345)
     val = [[example(test, rng, aug=rng.random() < 0.5) for _ in range(args.batch)] for _ in range(20)]
 
     out = RUNS / args.name
     out.mkdir(parents=True, exist_ok=True)
     log = open(out / "train.log", "a")
-    t0, best = time.time(), 0.0
-    for step in range(1, args.steps + 1):
+    t0, best, first = time.time(), 0.0, 1
+    if (out / "last.pt").exists():  # resume after a crash (the data stream restarts, not resumes)
+        ckpt = torch.load(out / "last.pt", map_location="cuda")
+        if "opt" in ckpt:
+            head.load_state_dict(ckpt["head"])
+            opt.load_state_dict(ckpt["opt"])
+            sched.load_state_dict(ckpt["sched"])
+            first, best = ckpt["step"] + 1, ckpt.get("best", 0.0)
+            print(f"resumed {args.name} at step {ckpt['step']}", flush=True)
+            log.write(f"resumed at step {ckpt['step']}\n")
+    for step in range(first, args.steps + 1):
         head.train()
         logits, y, m = run_batch(fe, encoder, head, q.get())
         loss = torch.nn.functional.binary_cross_entropy_with_logits(
@@ -271,6 +350,7 @@ def main():
             msg = f"step {step} loss {loss.item():.4f} lr {sched.get_last_lr()[0]:.2e} {time.time() - t0:.0f}s q={q.qsize()}"
             print(msg, flush=True)
             log.write(msg + "\n")
+            log.flush()
         if step % 1000 == 0 or step == args.steps:
             head.eval()
             tp = npred = ntrue = 0
@@ -286,11 +366,14 @@ def main():
             print(msg, flush=True)
             log.write(msg + "\n")
             log.flush()
-            ckpt = {"head": head.state_dict(), "groups": GROUP_NAMES, "step": step, "args": vars(args)}
-            torch.save(ckpt, out / "last.pt")
             if f1 > best:
                 best = f1
-                torch.save(ckpt, out / "head.pt")
+                torch.save({"head": head.state_dict(), "groups": GROUP_NAMES, "step": step, "args": vars(args)},
+                           out / "head.pt")
+            ckpt = {"head": head.state_dict(), "groups": GROUP_NAMES, "step": step, "args": vars(args),
+                    "opt": opt.state_dict(), "sched": sched.state_dict(), "best": best}
+            torch.save(ckpt, out / "last.tmp")
+            (out / "last.tmp").replace(out / "last.pt")  # never leave a half-written checkpoint
 
 
 if __name__ == "__main__":
