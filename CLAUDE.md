@@ -2,7 +2,7 @@
 
 Windows desktop app that mutes curse words in all system audio. Apps play into VB-Cable; this program holds the audio back, detects curse words and mutes them, then plays the result to the real speakers.
 
-- **Read [docs/HANDOFF.md](docs/HANDOFF.md) first.** It has the current state, results, open threads and next steps.
+- **Read `docs/HANDOFF.md` first** if it exists (local only, gitignored). It has the current state, results, open threads and next steps.
 - Full research write-up: [docs/mute-detector.md](docs/mute-detector.md) (v1–v3, synthetic speech) and [docs/real-speech.md](docs/real-speech.md) (real-speech test set, training on real speech, v4, Lambda runs). Literature and dataset licences: [docs/related-work-and-datasets.md](docs/related-work-and-datasets.md).
 
 ## Branches

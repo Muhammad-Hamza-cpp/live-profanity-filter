@@ -1,6 +1,6 @@
 r"""Find curse words in the transcripts of public real-speech datasets, without downloading audio.
 
-Feasibility scan for the real-speech test set (docs/HANDOFF.md, next steps 1): which lexicon words
+Feasibility scan for the real-speech test set (docs/real-speech.md): which lexicon words
 occur, how often, and in how many distinct sources. A source is an archive.org item for People's
 Speech and a video for YODAS2 (its video ids are anonymised, so channels can't be told apart).
 Only transcript bytes are fetched:
