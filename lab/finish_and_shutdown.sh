@@ -6,11 +6,11 @@
 # a 2-minute warning ("shutdown /a" in a terminal cancels it).
 # A failed run doesn't block: it is listed in the summary. If anything stays unfinished or the
 # results can't be pulled, nothing is terminated and the laptop simply stays on.
-#   bash lab/finish_and_shutdown.sh
+#   LAMBDA_INSTANCE=<instance id> LAMBDA_IP=<its IP> bash lab/finish_and_shutdown.sh
 cd "$(dirname "$0")/.."
 DEST=data/lambda_backup
-INSTANCE=1319a7ed710d439184165858548d7cb6  # the gpu_1x_a10 in us-west-1
-INSTANCE_IP=150.230.34.10
+INSTANCE=${LAMBDA_INSTANCE:?set LAMBDA_INSTANCE to this project's Lambda instance id}
+INSTANCE_IP=${LAMBDA_IP:?set LAMBDA_IP to that instance's IP}
 API=https://cloud.lambda.ai/api/v1
 log() { echo "$(date '+%H:%M') $*"; }
 
