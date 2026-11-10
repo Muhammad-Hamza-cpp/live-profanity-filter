@@ -42,6 +42,8 @@ The mode uses **v4**, trained on synthetic speech plus real public YouTube speec
 
 Details: [docs/real-speech.md](docs/real-speech.md).
 
+**Licence of the trained models:** the code is MIT, but the detector weights in `lab/detector/models/` were trained with ESC-50 sound effects (CC BY-NC), so use them for non-commercial research only.
+
 It's still experimental, and it hasn't been measured on game audio. The full write-up covers how the training data was made, every result, what went wrong and what's next: **[docs/mute-detector.md](docs/mute-detector.md)**.
 
 ## Requirements
